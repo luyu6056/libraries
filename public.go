@@ -31,6 +31,7 @@ import (
 )
 
 var http_c chan *http.Client
+var MsgBuf_chan = make(chan *MsgBuffer, runtime.NumCPU())
 
 func init() {
 	go func() {
@@ -54,6 +55,7 @@ func init() {
 				},
 			},
 		}
+		MsgBuf_chan <- &MsgBuffer{}
 		writer := new(Pgzip_writer)
 		writer.B = new(bytes.Buffer)
 		writer.Writer, _ = pgzip.NewWriterLevel(writer.B, 4) //4级解压速度快
@@ -1284,12 +1286,38 @@ func SortInt(list []int) {
 }
 
 func SortInt32(list []int32) {
-	var step, l, max, r, r_b, index, n int
 	max_len := len(list)
-	tmp := make([]int32, max_len)
+	for i := 0; i < max_len-max_len&1; i += 2 {
+		if list[i] > list[i+1] {
+			list[i], list[i+1] = list[i+1], list[i]
+		}
 
-	step = 1
-	for {
+	}
+	for i := 0; i < max_len-max_len&3; i += 4 {
+		if list[i] > list[i+2] {
+			list[i], list[i+2] = list[i+2], list[i]
+		}
+		if list[i+1] > list[i+3] {
+			list[i+1], list[i+3] = list[i+3], list[i+1]
+		}
+		if list[i+1] > list[i+2] {
+			list[i+1], list[i+2] = list[i+2], list[i+1]
+		}
+
+	}
+	if max_len&3 == 3 {
+		i := max_len - 3
+		if list[i] > list[i+2] {
+			list[i+1], list[i+2] = list[i+2], list[i+1]
+			list[i], list[i+1] = list[i+1], list[i]
+		} else if list[i+1] > list[i+2] {
+			list[i+1], list[i+2] = list[i+2], list[i+1]
+		}
+	}
+	var step, l, max, r, r_b, index, n int
+	tmp := make([]int32, max_len)
+	step = 4
+	for step < max_len {
 		n++
 		step <<= 1
 		if n&1 == 1 {
@@ -1351,12 +1379,9 @@ func SortInt32(list []int32) {
 
 			}
 		}
-		if step > max_len {
-			if n&1 == 1 {
-				copy(list, tmp)
-			}
-			return
-		}
+	}
+	if n&1 == 1 {
+		copy(list, tmp)
 	}
 }
 func MatchInt32(less_i, more_i []int32) []int32 {

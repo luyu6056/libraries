@@ -2,6 +2,7 @@ package libraries
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -11,8 +12,6 @@ import (
 	"sync"
 	"time"
 	"unsafe"
-
-	json "github.com/json-iterator/go"
 )
 
 const (
@@ -68,7 +67,6 @@ func (this *Mysql) Query_Select(select_sql string, t *Transaction) (maps []map[s
 	var columns [][]byte
 	defer rows_pool.Put(rows)
 Retry:
-
 	if t != nil && t.Connect != nil {
 		columns, err = t.Connect.Query([]byte(select_sql), rows)
 		if err != nil {
@@ -82,7 +80,7 @@ Retry:
 			} else if strings.Contains(err.Error(), "broken pipe") { //unix断连
 				goto Retry
 			} else {
-				return nil, err
+				return nil, errors.New(err.Error() + ",sql:" + string(select_sql))
 			}
 		}
 	}
@@ -113,7 +111,7 @@ type Field_struct struct {
 	Kind    reflect.Kind
 	Field_t reflect.Type
 }
-type SliceHeader struct {
+type sliceHeader struct {
 	Data unsafe.Pointer
 	Len  int
 	Cap  int
@@ -121,7 +119,6 @@ type SliceHeader struct {
 
 var Field_M sync.Map //MySQL字段名称与struct字段映射
 func (this *Mysql) Select(select_sql []byte, t *Transaction, r interface{}) (res bool, err error) {
-
 	if this == nil || this.db == nil {
 		err = errors.New("数据库未启动或者session未Begin")
 		return
@@ -130,7 +127,7 @@ func (this *Mysql) Select(select_sql []byte, t *Transaction, r interface{}) (res
 	var obj, obj_new reflect.Value
 	var type_struct, obj_t reflect.Type
 	var field_m *sync.Map
-	var header *SliceHeader
+	var header *sliceHeader
 	var ref_ptr uintptr
 	obj = reflect.Indirect(reflect.ValueOf(r))
 	switch obj.Kind() {
@@ -147,7 +144,7 @@ func (this *Mysql) Select(select_sql []byte, t *Transaction, r interface{}) (res
 				is_ptr = true
 			}
 		}
-		header = (*SliceHeader)(unsafe.Pointer(obj.Addr().Pointer()))
+		header = (*sliceHeader)(unsafe.Pointer(obj.Addr().Pointer()))
 	case reflect.Struct:
 		type_struct = obj.Type()
 		if v, ok := Field_M.Load(type_struct.Name()); ok {
@@ -225,7 +222,6 @@ Retry:
 			obj.SetLen(0)
 			obj.Set(reflect.AppendSlice(obj, reflect.MakeSlice(obj_t, rows.result_len, rows.result_len))) //创建一堆空nil指针或struct本体
 		}
-
 	}
 	//var ref reflect.Value
 
@@ -242,18 +238,19 @@ Retry:
 			if is_ptr {
 				if obj.Index(index).Elem().Kind() == reflect.Invalid {
 					*((*uintptr)(unsafe.Pointer(ref_ptr))) = reflect.New(type_struct).Pointer()
+
 					//obj.Index(index).Set(reflect.New(type_struct))
 				}
 				ref_ptr = *((*uintptr)(unsafe.Pointer(ref_ptr))) //获取指针真正的地址
 			}
 		}
-
 		for _, key := range columns {
 
 			rows.buffer, err = ReadLength_Coded_Byte(rows.Buffer2)
 			if err != nil {
 				return false, err
 			}
+
 			if v, ok := field_m.Load(string(key)); ok {
 				if v.(*Field_struct).Kind == reflect.Invalid {
 					continue
@@ -264,12 +261,9 @@ Retry:
 				key[0] = bytes.ToUpper(key[:1])[0]
 				field, ok := type_struct.FieldByName(string(key))
 				if !ok {
-					if field, ok = type_struct.FieldByName(re_srp.Replace(string(key))); !ok {
-						//if field, ok = type_struct.FieldByName(string(key)); !ok {
-						DEBUG("mysql.Select()反射struct无法写入字段" + string(key))
-						field_m.Store(real_key, &Field_struct{Kind: reflect.Invalid})
-						continue
-					}
+					DEBUG("mysql.Select()反射struct无法写入字段" + string(key) + "sql: " + string(select_sql))
+					field_m.Store(real_key, &Field_struct{Kind: reflect.Invalid})
+					continue
 				}
 
 				field_struct = &Field_struct{Offset: field.Offset, Kind: field.Type.Kind(), Field_t: field.Type}
@@ -342,7 +336,6 @@ Retry:
 			break
 		}
 	}
-
 	if is_slice {
 		obj.SetLen(rows.result_len)
 	}
@@ -353,39 +346,38 @@ Retry:
  *返回error
  *
  */
-func (this *Mysql) Exec(query_sql []byte, t ...*Transaction) (lastInsertId, rowCount int64, err error) {
-	if this == nil || this.db == nil {
-		err = errors.New("数据库未启动或者session未Begin")
-		return
-	}
+func (this *Mysql) Exec(query_sql []byte, t ...*Transaction) (result bool, err error) {
 	//var res *Mysql_result
+	//DEBUG(string(query_sql))
+	//var lastInsertId, rowsAffected int64
+
 	if len(t) == 1 && t[0] != nil && t[0].Connect != nil {
-		lastInsertId, rowCount, err = t[0].Connect.Exec(query_sql)
+		_, _, err = t[0].Connect.Exec(query_sql)
+
 	} else {
 	Retry:
-		lastInsertId, rowCount, err = this.db.Exec(query_sql)
+		_, _, err = this.db.Exec(query_sql)
 		if err != nil {
 			if strings.Contains(err.Error(), "EOF") {
 				goto Retry
 			} else if strings.Contains(err.Error(), "broken pipe") { //unix断连
 				goto Retry
 			} else {
-
-				return 0, 0, err
+				return false, err
 			}
 		}
-	}
 
+	}
+	result = false
+	if err == nil {
+		result = true
+	}
 	return
 }
 
 //执行语句并取受影响行数
 func (this *Mysql) Query_getaffected(query_sql []byte, t *Transaction) (rowsAffected int64, err error) {
-	if this == nil || this.db == nil {
-		err = errors.New("数据库未启动或者session未Begin")
-		return
-	}
-	//var LastInsertId int64
+
 	if t != nil && t.Connect != nil {
 		_, rowsAffected, err = t.Connect.Exec(query_sql)
 	} else {
@@ -433,7 +425,7 @@ func (this *Mysql) NewSession() (t *Transaction) {
 	t = &Transaction{DB: this.db, Mysql_build: new(Mysql_build)}
 	j := &Json_encode{}
 	j.B = bytes.NewBuffer(nil)
-	j.E = json.NewEncoder(j.B)
+	j.E = gjson.NewEncoder(j.B)
 	t.Mysql_build.json_encode = j
 	t.Mysql_build.DB = this
 	return
@@ -444,6 +436,7 @@ func (t *Transaction) Begin() (err error) {
 		return
 	}
 	//t.DB.Conn_num--
+	t.Connect.istx = true
 	t.Mysql_build.t = t
 	return
 }
@@ -563,16 +556,7 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 			}
 			r := obj.Elem()
 			t := r.Type()
-			var table_name string
-			if f := obj.MethodByName("TableName"); f.Kind() == reflect.Func {
-				rs := f.Call(nil)
-				if len(rs) == 1 && rs[0].Kind() == reflect.String {
-					table_name = rs[0].String()
-				}
-			}
-			if table_name == "" {
-				table_name = strings.TrimLeft(srp.Replace(t.Name()), "_")
-			}
+			table_name := t.Name()
 
 			res, err := mysql.QueryString(`show tables like ?`, table_name)
 			if err != nil {
@@ -595,7 +579,7 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 					var default_str string
 					field := r.Field(i)
 					field_t := t.Field(i)
-					field_str := strings.TrimLeft(srp.Replace(field_t.Name), "_")
+					field_str := field_t.Name
 					tags := field_t.Tag.Get(`xorm`)
 					if tags == `-` {
 						continue
@@ -739,7 +723,7 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 				buf.WriteString(") ENGINE=")
 				buf.WriteString(mysql.storeEngine)
 				buf.WriteString(" DEFAULT CHARSET=utf8")
-				_, _, err := mysql.Exec(buf.Bytes(), nil)
+				_, err := mysql.Exec(buf.Bytes(), nil)
 				if err != nil {
 					errs = append(errs, errors.New("执行新建数据库失败："+err.Error()+" 错误sql:"+buf.String()))
 					return
@@ -767,7 +751,7 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 					if tag == `-` {
 						continue
 					}
-					field_str := strings.TrimLeft(srp.Replace(field_t.Name), "_")
+					field_str := field_t.Name
 					var is_change, is_text bool
 					var notnull, is_pk bool
 					var default_str, varchar_str string
@@ -906,7 +890,6 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 											is_change = true
 											sql_str[1] = "text"
 										}
-										default_str = ""
 									}
 								} else {
 									is_text = true
@@ -1033,19 +1016,15 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 							sql_str[1] = "bigint(20)"
 							sql_str[3] = "Default '0'"
 						case reflect.String:
-							if sc, _ := Preg_match_result(`varchar\(\d+\)`, tag, 1); len(sc) > 0 {
-								varchar_str = sc[0][0]
-							}
+
 							sql_str[3] = "Default ''"
 							if varchar_str != "" {
 								sql_str[1] = varchar_str
 								sql_str[3] = "Default ''"
 								break
-							} else {
-								is_text = true
-								sql_str[1] = "text"
 							}
-
+							is_text = true
+							sql_str[1] = "text"
 						case reflect.Int32, reflect.Uint32:
 							sql_str[1] = "int(10)"
 							sql_str[3] = "Default '0'"
@@ -1094,9 +1073,7 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 								sql_str[2] = "NULL"
 							}
 						}
-						if is_text {
-							sql_str[3] = ""
-						}
+
 						sql_str[0] = "ADD `" + field_str + "`"
 						sql = append(sql, strings.Join(sql_str, " ")+after)
 					}
@@ -1113,8 +1090,8 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 				if len(sql) > 0 {
 					s := "ALTER TABLE " + table_name + " " + strings.Join(sql, ",")
 
-					_, _, err := mysql.Exec(Str2bytes(s), nil)
-					DEBUG(s)
+					_, err := mysql.Exec(Str2bytes(s), nil)
+
 					if err != nil {
 						errs = append(errs, errors.New(table_name+":"+err.Error()))
 						return
@@ -1127,7 +1104,7 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 					return
 				}
 				if res[0]["ENGINE"] != mysql.storeEngine {
-					_, _, err := mysql.Exec([]byte("ALTER TABLE "+table_name+" ENGINE = "+mysql.storeEngine), nil)
+					_, err := mysql.Exec([]byte("ALTER TABLE "+table_name+" ENGINE = "+mysql.storeEngine), nil)
 					if err != nil {
 						errs = append(errs, errors.New(table_name+":"+err.Error()))
 						return
@@ -1158,7 +1135,7 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 						buf.WriteString(" (`")
 						buf.WriteString(k)
 						buf.WriteString("`)")
-						_, _, err = mysql.Exec(buf.Bytes(), nil)
+						_, err = mysql.Exec(buf.Bytes(), nil)
 						if err != nil {
 							errs = append(errs, errors.New(table_name+":"+err.Error()))
 							return

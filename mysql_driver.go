@@ -562,12 +562,11 @@ func (mysql *Mysql_Conn) Exec(sql []byte) (lastInsertId int64, rowsAffected int6
 const mysqlmsglen = 1024 * 1024
 
 func (mysql *Mysql_Conn) read() error {
-	olen := mysql.buffer.Len()
 	buf := mysql.buffer.Make(mysqlmsglen)
 	n, err := mysql.conn.Read(buf)
 
 	if n < mysqlmsglen {
-		mysql.buffer.Truncate(olen + n)
+		mysql.buffer.Truncate(mysql.buffer.Len() - (mysqlmsglen - n))
 	}
 	return err
 }
@@ -595,15 +594,7 @@ func (mysql *Mysql_Conn) handshakePacket() (err error, seed []byte, seed2 []byte
 		err = errors.New(conn.RemoteAddr().String() + "连接数据库失败，获取消息报文长度错误")
 		return
 	}
-
-	switch mysql.buffer.Next(1)[0] {
-	case 10:
-		break
-	case 255:
-		mysql.buffer.Next(1)
-		err = errors.New("连接失败" + mysql.buffer.String())
-		return
-	default:
+	if mysql.buffer.Next(1)[0] != 10 {
 		err = errors.New(conn.RemoteAddr().String() + "连接数据库失败,不支持的协议版本")
 		return
 	}

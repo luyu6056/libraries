@@ -12,7 +12,7 @@ type MsgBuffer struct {
 }
 
 const (
-	blocksize = 1024 * 1024
+	blocksize = 4096
 )
 
 func (w *MsgBuffer) Reset() {
@@ -283,16 +283,3 @@ func (r *MsgBuffer) malloc(cap int) {
 	r.mask = newCap - 1
 	r.buf = newBuf
 }*/
-func (r *MsgBuffer) WithBytes(b []byte) []byte {
-	r.Write(b)
-	return r.Next(r.Len())
-}
-func (r *MsgBuffer) LazyRead(n int) ([]byte, []byte) {
-	if n > r.Len() {
-		n = r.Len()
-	}
-	return r.Bytes()[:n], nil
-}
-func (r *MsgBuffer) LazyReadAll() ([]byte, []byte) {
-	return r.Bytes(), nil
-}
