@@ -40,9 +40,7 @@ func NewPK(pks ...interface{}) *PK {
 }
 
 var Field_build sync.Map
-var table_name sync.Map
-var srp = strings.NewReplacer("A", "_a", "B", "_b", "C", "_c", "D", "_d", "E", "_e", "F", "_f", "G", "_g", "H", "_h", "I", "_i", "J", "_j", "K", "_k", "L", "_l", "M", "_m", "N", "_n", "O", "_o", "P", "_p", "Q", "_q", "R", "_r", "S", "_s", "T", "_t", "U", "_u", "V", "_v", "W", "_w", "X", "_x", "Y", "_y", "Z", "_z")
-var re_srp = strings.NewReplacer("_a", "A", "_b", "B", "_c", "C", "_d", "D", "_e", "E", "_f", "F", "_g", "G", "_h", "H", "_i", "I", "_j", "J", "_k", "K", "_l", "L", "_m", "M", "_n", "N", "_o", "O", "_p", "P", "_q", "Q", "_r", "R", "_s", "S", "_t", "T", "_u", "U", "_v", "V", "_w", "W", "_x", "X", "_y", "Y", "_z", "Z")
+
 var key_srp = strings.NewReplacer(`\`, `\\`, "`rank`", "rank", "`type`", "type", "`", "\\`", string(rune(0)), `\`+string(rune(0)))
 var value_srp = strings.NewReplacer(`\`, `\\`, "'", `\'`, string(rune(0)), `\`+string(rune(0)))
 
@@ -150,6 +148,7 @@ func (this *Mysql_build) GroupBy(str string) *Mysql_build {
 	//this.group = " group by " + str
 	return this
 }
+
 func (this *Mysql) Limit(m, n int) *Mysql_build {
 	build := <-build_chan
 	build.DB = this
@@ -162,32 +161,19 @@ func (this *Mysql_build) Limit(m, n int) *Mysql_build {
 	this.limit.WriteString(strconv.Itoa(n))
 	return this
 }
+
 func (this *Mysql_build) Update(i interface{}) (int64, error) {
 	defer this.put()
 	if this.err != nil {
 		return 0, this.err
 	}
 	r := reflect.ValueOf(i)
-	obj := r
 	for r.Kind() == reflect.Ptr {
-
 		r = r.Elem()
 	}
 	t := r.Type()
-	if v, ok := table_name.Load(t.Name()); ok {
-		this.table_name.WriteString(v.(string))
-	} else {
-		if f := obj.MethodByName("TableName"); f.Kind() == reflect.Func {
-			rs := f.Call(nil)
-			if len(rs) == 1 && rs[0].Kind() == reflect.String {
-				this.table_name.WriteString(rs[0].String())
-			}
-		}
-		if this.table_name.Len() == 0 {
-			this.table_name.WriteString(strings.TrimLeft(srp.Replace(t.Name()), "_"))
-		}
-		table_name.Store(t.Name(), this.table_name.String())
-	}
+	this.table_name.WriteString(t.Name())
+
 	var field_m *sync.Map
 	if v, ok := Field_build.Load(this.table_name.String()); ok {
 		field_m = v.(*sync.Map)
@@ -207,7 +193,7 @@ func (this *Mysql_build) Update(i interface{}) (int64, error) {
 						this.str.Write(v.([]byte))
 						this.str.WriteByte(61)
 					} else {
-						bin := []byte(this.getkey(strings.TrimLeft(srp.Replace(field.Name), "_")))
+						bin := []byte(this.getkey(field.Name))
 						this.str.Write(bin)
 						this.str.WriteByte(61)
 						field_m.Store(i, bin)
@@ -242,7 +228,7 @@ func (this *Mysql_build) Update(i interface{}) (int64, error) {
 				this.str.Write(v.([]byte))
 				this.str.WriteByte(61)
 			} else {
-				bin := []byte(this.getkey(strings.TrimLeft(srp.Replace(field_t.Name), "_")))
+				bin := []byte(this.getkey(field_t.Name))
 				this.str.Write(bin)
 				this.str.WriteByte(61)
 				field_m.Store(i, bin)
@@ -264,7 +250,7 @@ func (this *Mysql_build) Update(i interface{}) (int64, error) {
 		for _, field_str := range fields {
 			str := make([]byte, len(field_str))
 			copy(str, field_str)
-			field_str[0] = bytes.ToUpper(field_str[:1])[0]
+			//field_str[0] = bytes.ToUpper(field_str[:1])[0]
 			var keyname string
 			var field_struct *Field_struct
 			if v, ok := field_str_m.Load(string(str)); ok {
@@ -276,11 +262,10 @@ func (this *Mysql_build) Update(i interface{}) (int64, error) {
 				keyname = string(field_str)
 				field, ok := t.FieldByName(keyname)
 				if !ok {
-					keyname = strings.TrimLeft(re_srp.Replace(string(keyname)), "_")
-					if field, ok = t.FieldByName(keyname); !ok {
-						field_str_m.Store(string(str), &Field_struct{Kind: reflect.Invalid})
-						return 0, errors.New("update执行失败，找不到field值" + string(field_str))
-					}
+
+					field_str_m.Store(string(str), &Field_struct{Kind: reflect.Invalid})
+					return 0, errors.New("update执行失败，找不到field值" + string(field_str))
+
 				}
 				field_struct = &Field_struct{Offset: field.Offset, Kind: field.Type.Kind(), Field_t: field.Type}
 				field_str_m.Store(string(str), field_struct)
@@ -343,28 +328,12 @@ func (this *Mysql_build) Get(s interface{}) (bool, error) {
 		return false, this.err
 	}
 	r := reflect.ValueOf(s)
-	var obj reflect.Value
 	t := r.Type()
 	for r.Kind() == reflect.Ptr {
-		obj = r
 		r = r.Elem()
 		t = t.Elem()
 	}
-
-	if v, ok := table_name.Load(t.Name()); ok {
-		this.table_name.WriteString(v.(string))
-	} else {
-		if f := obj.MethodByName("TableName"); f.Kind() == reflect.Func {
-			rs := f.Call(nil)
-			if len(rs) == 1 && rs[0].Kind() == reflect.String {
-				this.table_name.WriteString(rs[0].String())
-			}
-		}
-		if this.table_name.Len() == 0 {
-			this.table_name.WriteString(strings.TrimLeft(srp.Replace(t.Name()), "_"))
-		}
-		table_name.Store(t.Name(), this.table_name.String())
-	}
+	this.table_name.WriteString(t.Name())
 	var field_m *sync.Map
 	if v, ok := Field_build.Load(this.table_name.String()); ok {
 		field_m = v.(*sync.Map)
@@ -384,7 +353,7 @@ func (this *Mysql_build) Get(s interface{}) (bool, error) {
 							this.str.Write(v.([]byte))
 							this.str.WriteByte(61)
 						} else {
-							bin := []byte(this.getkey(strings.TrimLeft(srp.Replace(field.Name), "_")))
+							bin := []byte(this.getkey(field.Name))
 							this.str.Write(bin)
 							this.str.WriteByte(61)
 							field_m.Store(i, bin)
@@ -436,37 +405,17 @@ func (this *Mysql_build) Find(s interface{}) (err error) {
 	}
 	obj := reflect.ValueOf(s)
 	for obj.Kind() == reflect.Ptr {
-		if f := obj.MethodByName("TableName"); f.Kind() == reflect.Func {
-			rs := f.Call(nil)
-			if len(rs) == 1 && rs[0].Kind() == reflect.String {
-				this.table_name.WriteString(rs[0].String())
-			}
-		}
 		obj = obj.Elem()
 	}
 	t := obj.Type()
 	if obj.Kind() == reflect.Slice {
+		obj.SetLen(0)
 		t = t.Elem()
 		for t.Kind() == reflect.Ptr {
 			t = t.Elem()
 		}
-		if this.table_name.Len() == 0 {
-			if v, ok := table_name.Load(t.Name()); ok {
-				this.table_name.WriteString(v.(string))
-			} else {
-				new_r := reflect.New(t)
-				if f := new_r.MethodByName("TableName"); f.Kind() == reflect.Func {
-					rs := f.Call(nil)
-					if len(rs) == 1 && rs[0].Kind() == reflect.String {
-						this.table_name.WriteString(rs[0].String())
-					}
-				}
-				if this.table_name.Len() == 0 {
-					this.table_name.WriteString(strings.TrimLeft(srp.Replace(t.Name()), "_"))
-				}
-				table_name.Store(t.Name(), this.table_name.String())
-			}
-		}
+
+		this.table_name.WriteString(t.Name())
 		var field_m *sync.Map
 		if v, ok := Field_build.Load(this.table_name.String()); ok {
 			field_m = v.(*sync.Map)
@@ -487,7 +436,7 @@ func (this *Mysql_build) Find(s interface{}) (err error) {
 								this.str.Write(v.([]byte))
 								this.str.WriteByte(61)
 							} else {
-								bin := []byte(this.getkey(strings.TrimLeft(srp.Replace(field.Name), "_")))
+								bin := []byte(this.getkey(field.Name))
 								this.str.Write(bin)
 								this.str.WriteByte(61)
 								field_m.Store(i, bin)
@@ -520,6 +469,7 @@ func (this *Mysql_build) Find(s interface{}) (err error) {
 	this.str.Write(this.lock.Bytes())
 	//sql := `select ` + this.field.String() + ` from ` + this.table_name + this.where.String() + this.group.String() + this.order.String() + this.limit.String()
 	//DEBUG(`sql语句` + this.str.String())
+
 	_, e := this.DB.Select(this.str.Bytes(), this.t, s)
 
 	if e != nil {
@@ -533,26 +483,11 @@ func (this *Mysql_build) Delete(s interface{}) (bool, error) {
 		return false, this.err
 	}
 	r := reflect.ValueOf(s)
-	obj := r
 	for r.Kind() == reflect.Ptr {
 		r = r.Elem()
 	}
 	t := r.Type()
-
-	if v, ok := table_name.Load(t.Name()); ok {
-		this.table_name.WriteString(v.(string))
-	} else {
-		if f := obj.MethodByName("TableName"); f.Kind() == reflect.Func {
-			rs := f.Call(nil)
-			if len(rs) == 1 && rs[0].Kind() == reflect.String {
-				this.table_name.WriteString(rs[0].String())
-			}
-		}
-		if this.table_name.Len() == 0 {
-			this.table_name.WriteString(strings.TrimLeft(srp.Replace(r.Type().Name()), "_"))
-		}
-		table_name.Store(t.Name(), this.table_name.String())
-	}
+	this.table_name.WriteString(r.Type().Name())
 	var field_m *sync.Map
 	if v, ok := Field_build.Load(this.table_name.String()); ok {
 		field_m = v.(*sync.Map)
@@ -572,7 +507,7 @@ func (this *Mysql_build) Delete(s interface{}) (bool, error) {
 						this.str.Write(v.([]byte))
 						this.str.WriteByte(61)
 					} else {
-						bin := []byte(this.getkey(strings.TrimLeft(srp.Replace(field.Name), "_")))
+						bin := []byte(this.getkey(field.Name))
 						this.str.Write(bin)
 						this.str.WriteByte(61)
 						field_m.Store(i, bin)
@@ -597,12 +532,11 @@ func (this *Mysql_build) Delete(s interface{}) (bool, error) {
 	this.str.Write(this.order.Bytes())
 	this.str.Write(this.limit.Bytes())
 	//sql := `DELETE FROM ` + this.table_name + this.where.String() + this.order.String() + this.limit.String()
-	_, rowCount, err := this.DB.Exec(this.str.Bytes(), this.t)
+	result, err := this.DB.Exec(this.str.Bytes(), this.t)
 	if err != nil {
 		err = errors.New(`执行Delete出错,sql错误信息：` + err.Error() + `,错误sql：` + this.str.String())
 	}
-
-	return rowCount > 0, err
+	return result, err
 }
 
 /*执行sql语句
@@ -630,15 +564,25 @@ func (this *Mysql) Insert(s ...interface{}) (LastInsertId int64, err error) {
 	if err != nil {
 		return 0, err
 	}
-	var rowCount int64
+	var rowsAffected int64
 	if t != nil && t.Connect != nil {
-		LastInsertId, rowCount, err = t.Connect.Exec(sql)
+		LastInsertId, rowsAffected, err = t.Connect.Exec(sql)
 	} else {
-		LastInsertId, rowCount, err = this.db.Exec(sql)
+	Retry:
+		LastInsertId, rowsAffected, err = this.db.Exec(sql)
+		if err != nil {
+			if strings.Contains(err.Error(), "EOF") {
+				goto Retry
+			} else if strings.Contains(err.Error(), "broken pipe") { //unix断连
+				goto Retry
+			} else {
+				return 0, err
+			}
+		}
 	}
 	if err == nil {
 		if LastInsertId == 0 {
-			if rowCount == 0 {
+			if rowsAffected == 0 {
 				err = errors.New("插入失败，影响行数为0")
 			}
 		}
@@ -647,7 +591,6 @@ func (this *Mysql) Insert(s ...interface{}) (LastInsertId int64, err error) {
 	}
 	return
 }
-
 func (this *Mysql_build) Insert(s interface{}) (LastInsertId int64, err error) {
 	defer this.put()
 	if this.err != nil {
@@ -657,46 +600,42 @@ func (this *Mysql_build) Insert(s interface{}) (LastInsertId int64, err error) {
 	if err != nil {
 		return 0, err
 	}
-	var rowCount int64
+	var rowsAffected int64
 	if this.t != nil && this.t.Connect != nil {
-		LastInsertId, rowCount, err = this.t.Connect.Exec(sql)
+		LastInsertId, rowsAffected, err = this.t.Connect.Exec(sql)
 	} else {
-		LastInsertId, rowCount, err = this.DB.db.Exec(sql)
+	Retry:
+		LastInsertId, rowsAffected, err = this.DB.db.Exec(sql)
+		if err != nil {
+			if strings.Contains(err.Error(), "EOF") {
+				goto Retry
+			} else if strings.Contains(err.Error(), "broken pipe") { //unix断连
+				goto Retry
+			} else {
+				return 0, err
+			}
+		}
 	}
 	if err == nil {
-
 		if LastInsertId == 0 {
-
-			if rowCount == 0 {
+			if rowsAffected == 0 {
 				err = errors.New("插入失败，影响行数为0")
 			}
 		}
+	} else {
+		err = errors.New(err.Error() + "错误sql:" + string(sql))
 	}
 	return
 }
 func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 	r := reflect.ValueOf(s)
-	obj := r
 	for r.Kind() == reflect.Ptr {
 		r = r.Elem()
 	}
 	switch r.Kind() {
 	case reflect.Struct:
 		t := r.Type()
-		if v, ok := table_name.Load(t.Name()); ok {
-			this.table_name.WriteString(v.(string))
-		} else {
-			if f := obj.MethodByName("TableName"); f.Kind() == reflect.Func {
-				rs := f.Call(nil)
-				if len(rs) == 1 && rs[0].Kind() == reflect.String {
-					this.table_name.WriteString(rs[0].String())
-				}
-			}
-			if this.table_name.Len() == 0 {
-				this.table_name.WriteString(strings.TrimLeft(srp.Replace(t.Name()), "_"))
-			}
-			table_name.Store(t.Name(), this.table_name.String())
-		}
+		this.table_name.WriteString(t.Name())
 		var field_m *sync.Map
 		if v, ok := Field_build.Load(this.table_name.String()); ok {
 			field_m = v.(*sync.Map)
@@ -719,7 +658,7 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 				this.str.Write(v.([]byte))
 				this.str.WriteByte(61)
 			} else {
-				bin := []byte(this.getkey(strings.TrimLeft(srp.Replace(field_t.Name), "_")))
+				bin := []byte(this.getkey(field_t.Name))
 				this.str.Write(bin)
 				this.str.WriteByte(61)
 				field_m.Store(i1, bin)
@@ -734,26 +673,20 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 		//field_r := []reflect.Value{}
 		this.field.Reset()
 		if r.Len() == 0 {
-			DEBUG("警告错误")
+			return nil, errors.New("传入长度为0的slice")
 		}
 		for i := 0; i < r.Len(); i++ {
 			v := r.Index(i)
 			for v.Kind() == reflect.Ptr {
-				if this.table_name.Len() == 0 {
-					if f := v.MethodByName("TableName"); f.Kind() == reflect.Func {
-						rs := f.Call(nil)
-						if len(rs) == 1 && rs[0].Kind() == reflect.String {
-							this.table_name.WriteString(rs[0].String())
-						}
-					}
-				}
+
 				v = v.Elem()
 			}
 			switch v.Kind() {
 			case reflect.Struct:
 				if this.table_name.Len() == 0 {
-					this.table_name.WriteString(strings.TrimLeft(srp.Replace(v.Type().Name()), "_"))
+					this.table_name.WriteString(v.Type().Name())
 				}
+
 				t := v.Type()
 
 				var field_t reflect.StructField
@@ -767,7 +700,7 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 					}
 					if i == 0 {
 						//取出key的排列
-						this.limit.Write(this.getkey(strings.TrimLeft(srp.Replace(t.Field(i1).Name), "_")))
+						this.limit.Write(this.getkey(t.Field(i1).Name))
 						this.limit.WriteByte(44)
 					}
 					this.where.Write(this.getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
@@ -775,17 +708,6 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 				}
 				this.field.Write(this.where.Bytes()[:this.where.Len()-1])
 				this.field.Write([]byte{41, 44})
-
-				if this.table_name.Len() == 0 {
-					if v, ok := table_name.Load(t.Name()); ok {
-						this.table_name.WriteString(v.(string))
-					} else {
-						if this.table_name.Len() == 0 {
-							this.table_name.WriteString(strings.TrimLeft(srp.Replace(t.Name()), "_"))
-						}
-						table_name.Store(t.Name(), this.table_name.String())
-					}
-				}
 			default:
 				return nil, errors.New(`执行InsertAll出错，不支持的slice子元素插入类型` + fmt.Sprint(v.Kind()))
 			}
@@ -797,6 +719,7 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 		this.str.Write([]byte{32, 40})
 		this.str.Write(this.limit.Bytes()[:this.limit.Len()-1])
 		this.str.Write([]byte{41, 32, 86, 65, 76, 85, 69, 83, 32})
+
 		this.str.Write(this.field.Bytes()[:this.field.Len()-1])
 		//sql := `replace into ` + this.table_name.String() + ` (` + strings.Join(field, `,`) + `) VALUES ` + strings.Join(value, `,`)
 		//DEBUG(this.str.String())
@@ -906,13 +829,17 @@ func (this *Mysql_build) getvalueByUnitptr(ptr uintptr, type_name string, field_
 			this.err = this.json_encode.E.Encode(r.Addr().Interface())
 			str = encodeHex(this.json_encode.B.Bytes())
 		} else {
-			s := fmt.Sprint(r.Addr().Interface())
-			str = encodeHex(*(*[]byte)(unsafe.Pointer(&s)))
+			if r.Kind() == reflect.Invalid {
+				str = "null"
+			} else {
+				s := fmt.Sprint(r.Addr().Interface())
+				str = encodeHex(*(*[]byte)(unsafe.Pointer(&s)))
+			}
+
 		}
 	}
 	return *(*[]byte)(unsafe.Pointer(&str))
 }
-
 func encodeHex(bin []byte) string {
 	if len(bin) == 0 {
 		return "''"

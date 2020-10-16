@@ -1,7 +1,7 @@
 package libraries
 
 import (
-	"errors"
+	"reflect"
 	"sync"
 )
 
@@ -11,12 +11,16 @@ var rows_pool = sync.Pool{New: func() interface{} {
 	return row
 }}
 
+type Field_struct struct {
+	Offset  uintptr
+	Kind    reflect.Kind
+	Field_t reflect.Type
+}
 type MysqlRows struct {
-	Buffer    *MsgBuffer
-	Buffer2   *MsgBuffer
-	field_len int
-	msg_len   []int
-	buffer    []byte
+	Buffer, Buffer2 *MsgBuffer
+	field_len       int
+	msg_len         []int
+	buffer          []byte
 	//msg_buffer_no *int
 	field      []byte
 	field_m    map[string]map[string]*Field_struct
@@ -25,48 +29,48 @@ type MysqlRows struct {
 }
 
 func (row *MysqlRows) Columns(mysql *Mysql_Conn) (columns [][]byte, err error) {
-	if len(row.fields) < row.field_len {
-		row.fields = append(row.fields, make([][]byte, row.field_len-len(row.fields))...)
+	if cap(row.fields) < row.field_len {
+		row.fields = make([][]byte, 0, row.field_len)
 	}
-
 	row.result_len = 0
-	columns = row.fields
+	columns = row.fields[:row.field_len]
 	var index uint32
-	var def string
-	var msglen, field_index int
+	var msglen, pos, field_index int
 
-	for true {
-		msglen, err = mysql.readOneMsg()
-		if err != nil {
+	for msglen, err = mysql.readOneMsg(); err == nil; msglen, err = mysql.readOneMsg() {
+		data := mysql.readBuffer.Next(msglen)
 
-			return
-		}
-		row.Buffer.Reset()
-		row.Buffer.Write(mysql.buffer.Next(msglen))
-		if msglen == 5 && row.Buffer.Bytes()[0] == 0xFE { //eof包
+		if msglen == 5 && data[0] == 0xfe { //EOF
 			break
 		}
-		def, err = ReadLengthCodedStringFromBuffer(row.Buffer, true)
-		if err != nil || def != "def" {
-			return nil, errors.New("读取查询结果目录头错误")
+		pos = 0
+		msglen, err = ReadLength_Coded_Slice(data, &pos)
+		if err != nil {
+			return
 		}
+		pos += msglen
 
-		_, err = ReadLengthCodedStringFromBuffer(row.Buffer, false)
+		// Database [len coded string]
+		msglen, err = ReadLength_Coded_Slice(data[pos:], &pos)
 		if err != nil {
 			return
 		}
 
-		_, err = ReadLengthCodedStringFromBuffer(row.Buffer, false)
+		pos += msglen
+		// Table [len coded string]
+		msglen, err = ReadLength_Coded_Slice(data[pos:], &pos)
 		if err != nil {
 			return
 		}
-
-		_, err = ReadLengthCodedStringFromBuffer(row.Buffer, false)
+		pos += msglen
+		// Original table [len coded string]
+		msglen, err = ReadLength_Coded_Slice(data[pos:], &pos)
 		if err != nil {
 			return
 		}
-
-		msglen, err = ReadLength_Coded_Binary(row.Buffer)
+		pos += msglen
+		// Name [len coded string]
+		msglen, err = ReadLength_Coded_Slice(data[pos:], &pos)
 		if err != nil {
 			return
 		}
@@ -74,24 +78,24 @@ func (row *MysqlRows) Columns(mysql *Mysql_Conn) (columns [][]byte, err error) {
 			row.field = append(row.field, make([]byte, msglen)...)
 		}
 		columns[index] = row.field[field_index : field_index+msglen]
-		copy(columns[index], row.Buffer.Next(msglen))
+		copy(columns[index], data[pos:pos+msglen])
 		field_index += msglen
+
 		index++
 	}
-	//DEBUG(row.Buffer.Bytes())
+	//libraries.DEBUG(row.Buffer.Bytes())
 	row.Buffer.Reset()
 	row.msg_len = row.msg_len[:0]
-	for true {
-		msglen, err = mysql.readOneMsg()
-		//DEBUG(olen, row.Buffer.Bytes())
-		row.Buffer.Write(mysql.buffer.Next(msglen))
-		if msglen == 5 && row.Buffer.Bytes()[row.Buffer.Len()-5] == 0xfe { //eof包
-			break
+	for msglen, err := mysql.readOneMsg(); err == nil; msglen, err = mysql.readOneMsg() {
+		data := mysql.readBuffer.Next(msglen)
+		if msglen == 5 && data[0] == 0xfe { //EOF
+			return columns, nil
 		}
+		row.Buffer.Write(data)
 		row.result_len++
 		row.msg_len = append(row.msg_len, msglen)
 	}
-	return columns[:index], nil
+	return columns, err
 }
 
 func (row *MysqlRows) Scan(a ...*[]byte) error {
