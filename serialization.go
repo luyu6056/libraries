@@ -374,5 +374,20 @@ var msgpack_chan = make(chan *Msgpack_encode, runtime.NumCPU())
 var msgpack_d_chan = make(chan *Msgpack_decode, runtime.NumCPU())
 
 func init() {
+	for i := 0; i < runtime.NumCPU(); i++ {
+		m := &Msgpack_encode{B: new(bytes.Buffer)}
+		m.E = msgpack.NewEncoder(m.B)
+		msgpack_chan <- m
 
+		m_d := &Msgpack_decode{B: new(bytes.Buffer)}
+		m_d.D = msgpack.NewDecoder(m_d.B)
+		msgpack_d_chan <- m_d
+		j := &Json_encode{B: new(bytes.Buffer)}
+		j.E = gjson.NewEncoder(m.B)
+		json_chan <- j
+
+		j_d := &Json_decode{B: new(bytes.Buffer)}
+		j_d.D = gjson.NewDecoder(m_d.B)
+		json_d_chan <- j_d
+	}
 }

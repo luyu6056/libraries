@@ -34,13 +34,6 @@ var http_c chan *http.Client
 var MsgBuf_chan = make(chan *MsgBuffer, runtime.NumCPU())
 
 func init() {
-	go func() {
-		err := http.ListenAndServe("0.0.0.0:8081", nil)
-		if err != nil {
-			http.ListenAndServe("0.0.0.0:8082", nil)
-		}
-
-	}()
 	http_c = make(chan *http.Client, runtime.NumCPU()*5)
 	for i := 0; i < runtime.NumCPU(); i++ {
 		http_c <- &http.Client{
