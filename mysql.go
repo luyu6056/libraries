@@ -2,7 +2,6 @@ package libraries
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -13,6 +12,8 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+
+	jsoniter "github.com/json-iterator/go"
 )
 
 const (
@@ -51,10 +52,10 @@ func (this *Mysql) QueryString(format string, i ...interface{}) (maps []map[stri
 	if len(i) == 0 {
 		return this.Query_Select(format, nil)
 	}
-	b := new(Mysql_build)
+
 	str := make([]interface{}, len(i))
 	for k, v := range i {
-		str[k] = b.getvalue(v)
+		str[k] = getvalue(v)
 	}
 	sql := fmt.Sprintf(strings.Replace(format, "?", `%s`, -1), str...)
 	return this.Query_Select(sql, nil)
@@ -119,12 +120,12 @@ func (this *Mysql) Select(select_sql []byte, t *Transaction, r interface{}) (res
 		err = errors.New("数据库未启动或者session未Begin")
 		return
 	}
-	var is_struct, is_slice, is_ptr bool
-	var obj, obj_new reflect.Value
+	var is_struct, is_ptr bool
+	var obj reflect.Value
 	var type_struct, obj_t reflect.Type
 	var field_m *sync.Map
 	var header *sliceHeader
-	var ref_ptr uintptr
+	var ref_ptr unsafe.Pointer
 	obj = reflect.Indirect(reflect.ValueOf(r))
 	switch obj.Kind() {
 	case reflect.Slice:
@@ -132,11 +133,11 @@ func (this *Mysql) Select(select_sql []byte, t *Transaction, r interface{}) (res
 		obj_t = obj.Type()
 		type_struct = obj_t.Elem()
 		if type_struct.Kind() == reflect.Struct {
-			is_slice = true
+
 		} else if type_struct.Kind() == reflect.Ptr {
 			type_struct = type_struct.Elem()
 			if type_struct.Kind() == reflect.Struct {
-				is_slice = true
+
 				is_ptr = true
 			}
 		}
@@ -150,7 +151,7 @@ func (this *Mysql) Select(select_sql []byte, t *Transaction, r interface{}) (res
 			Field_M.Store(type_struct.Name(), field_m)
 		}
 		is_struct = true
-		ref_ptr = obj.Addr().Pointer()
+		ref_ptr = unsafe.Pointer(obj.Addr().Pointer())
 	case reflect.Ptr:
 		type_struct = obj.Type()
 		switch type_struct.Kind() {
@@ -161,14 +162,14 @@ func (this *Mysql) Select(select_sql []byte, t *Transaction, r interface{}) (res
 				if obj.Elem().Kind() == reflect.Invalid {
 					obj.Set(reflect.New(type_struct))
 				}
-				ref_ptr = obj.Pointer()
+				ref_ptr = unsafe.Pointer(obj.Pointer())
 			} else {
 				err = errors.New("不支持的反射类型")
 				return
 			}
 
 		case reflect.Struct:
-			ref_ptr = obj.Addr().Pointer()
+			ref_ptr = unsafe.Pointer(obj.Addr().Pointer())
 		default:
 			err = errors.New("不支持的反射类型")
 			return
@@ -210,36 +211,50 @@ Retry:
 	if rows.result_len == 0 {
 		return false, nil
 	}
-	if is_slice {
-		if obj.Cap() < rows.result_len {
-			if is_ptr && obj.Cap() == 0 {
-				obj_new = reflect.MakeSlice(reflect.SliceOf(type_struct), rows.result_len, rows.result_len) //创建一堆struct本体
-			}
-			obj.SetLen(0)
-			obj.Set(reflect.AppendSlice(obj, reflect.MakeSlice(obj_t, rows.result_len, rows.result_len))) //创建一堆空nil指针或struct本体
-		}
-	}
-	//var ref reflect.Value
 
+	//var ref reflect.Value
 	var field_struct *Field_struct
+	var uint_ptr, offset uintptr
+
+	if is_struct {
+		offset = 0
+		if is_ptr {
+			if *(*interface{})(unsafe.Pointer(ref_ptr)) == nil {
+				*(*uintptr)(ref_ptr) = reflect.New(type_struct).Pointer()
+			}
+		}
+
+		rows.msg_len = rows.msg_len[:1]
+	} else {
+		if header.Len < rows.result_len {
+			if obj.Cap() < rows.result_len {
+				obj.SetLen(0)
+				obj.Set(reflect.AppendSlice(obj, reflect.MakeSlice(obj_t, rows.result_len, rows.result_len))) //创建一堆空nil指针或struct本体
+			} else {
+				obj.SetLen(rows.result_len)
+			}
+		}
+		ref_ptr = header.Data
+		if is_ptr {
+			offset = Uintptr_offset
+		} else {
+			offset = type_struct.Size()
+		}
+
+	}
+
 	for index, mglen := range rows.msg_len {
+		uint_ptr = uintptr(ref_ptr) + offset*uintptr(index)
+		if is_ptr {
+			if *(*interface{})(unsafe.Pointer(uint_ptr)) == nil {
+				*((*uintptr)(unsafe.Pointer(uint_ptr))) = reflect.New(type_struct).Pointer()
+			}
+			uint_ptr = *(*uintptr)(unsafe.Pointer(uint_ptr)) //获取指针真正的地址
+		}
+
 		rows.Buffer2.Reset()
 		rows.Buffer2.Write(rows.Buffer.Next(mglen))
-		if is_slice {
-			ref_ptr = uintptr(header.Data) + Uintptr_offset*uintptr(index)
-			if obj_new.Kind() == reflect.Slice && obj_new.Len() == rows.result_len {
-				*((*uintptr)(unsafe.Pointer(ref_ptr))) = obj_new.Index(index).Addr().Pointer()
-				//obj.Index(index).Set(obj_new.Index(index).Addr()) //从本体生成指针
-			}
-			if is_ptr {
-				if obj.Index(index).Elem().Kind() == reflect.Invalid {
-					*((*uintptr)(unsafe.Pointer(ref_ptr))) = reflect.New(type_struct).Pointer()
 
-					//obj.Index(index).Set(reflect.New(type_struct))
-				}
-				ref_ptr = *((*uintptr)(unsafe.Pointer(ref_ptr))) //获取指针真正的地址
-			}
-		}
 		for _, key := range columns {
 
 			rows.buffer, err = ReadLength_Coded_Byte(rows.Buffer2)
@@ -268,73 +283,81 @@ Retry:
 
 			switch field_struct.Kind {
 			case reflect.Int:
-				ii, _ := strconv.Atoi(string(rows.buffer))
-				*((*int)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = ii
+				ii, _ := strconv.Atoi(*(*string)(unsafe.Pointer(&rows.buffer)))
+				*((*int)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = ii
 			case reflect.Int8:
-				ii, _ := strconv.Atoi(string(rows.buffer))
-				*((*int8)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = int8(ii)
+				ii, _ := strconv.Atoi(*(*string)(unsafe.Pointer(&rows.buffer)))
+				*((*int8)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = int8(ii)
 			case reflect.Int16:
-				ii, _ := strconv.Atoi(string(rows.buffer))
-				*((*int16)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = int16(ii)
+				ii, _ := strconv.Atoi(*(*string)(unsafe.Pointer(&rows.buffer)))
+				*((*int16)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = int16(ii)
 			case reflect.Int32:
-				ii, _ := strconv.Atoi(string(rows.buffer))
-				*((*int32)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = int32(ii)
+				ii, _ := strconv.Atoi(*(*string)(unsafe.Pointer(&rows.buffer)))
+				*((*int32)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = int32(ii)
 			case reflect.Int64:
-				ii, _ := strconv.Atoi(string(rows.buffer))
-				*((*int64)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = int64(ii)
+				ii, _ := strconv.Atoi(*(*string)(unsafe.Pointer(&rows.buffer)))
+				*((*int64)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = int64(ii)
+			case reflect.Uint:
+				ii, _ := strconv.Atoi(*(*string)(unsafe.Pointer(&rows.buffer)))
+				*((*uint)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = uint(ii)
 			case reflect.Uint8:
-				ii, _ := strconv.Atoi(string(rows.buffer))
-				*((*uint8)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = uint8(ii)
+				ii, _ := strconv.Atoi(*(*string)(unsafe.Pointer(&rows.buffer)))
+				*((*uint8)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = uint8(ii)
 			case reflect.Uint16:
-				ii, _ := strconv.Atoi(string(rows.buffer))
-				*((*uint16)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = uint16(ii)
+				ii, _ := strconv.Atoi(*(*string)(unsafe.Pointer(&rows.buffer)))
+				*((*uint16)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = uint16(ii)
 			case reflect.Uint32:
-				ii, _ := strconv.Atoi(string(rows.buffer))
-				*((*uint32)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = uint32(ii)
+				ii, _ := strconv.Atoi(*(*string)(unsafe.Pointer(&rows.buffer)))
+				*((*uint32)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = uint32(ii)
 			case reflect.Uint64:
-				ii, _ := strconv.Atoi(string(rows.buffer))
-				*((*uint64)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = uint64(ii)
+				ii, _ := strconv.ParseUint(*(*string)(unsafe.Pointer(&rows.buffer)), 10, 64)
+				*((*uint64)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = uint64(ii)
 			case reflect.Float32:
-				f, _ := strconv.ParseFloat(string(rows.buffer), 32)
-				*((*float32)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = float32(f)
+				f, _ := strconv.ParseFloat(*(*string)(unsafe.Pointer(&rows.buffer)), 32)
+				*((*float32)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = float32(f)
 			case reflect.Float64:
-				f, _ := strconv.ParseFloat(string(rows.buffer), 64)
-				*((*float64)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = f
+				f, _ := strconv.ParseFloat(*(*string)(unsafe.Pointer(&rows.buffer)), 64)
+				*((*float64)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = f
 			case reflect.String:
-				*((*string)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = string(rows.buffer)
+				if str := string(rows.buffer); str != "NULL" {
+					*((*string)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = str
+				}
+
 			case reflect.Bool:
-				*((*bool)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = rows.buffer[0] == 48
+				*((*bool)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = rows.buffer[0] == 48
 			case reflect.Struct:
 				switch field_struct.Field_t.String() {
 				case "time.Time":
-					*((*time.Time)(unsafe.Pointer(ref_ptr + field_struct.Offset))), _ = time.ParseInLocation("2006-01-02 15:04:05", string(rows.buffer), time.Local)
-
+					*((*time.Time)(unsafe.Pointer(uint_ptr + field_struct.Offset))), _ = time.ParseInLocation("2006-01-02 15:04:05", string(rows.buffer), time.Local)
 				default:
-					field := reflect.NewAt(field_struct.Field_t, unsafe.Pointer(ref_ptr+field_struct.Offset))
-					json.Unmarshal(rows.buffer, field.Interface())
+					field := reflect.NewAt(field_struct.Field_t, unsafe.Pointer(uint_ptr+field_struct.Offset))
+					jsoniter.Unmarshal(rows.buffer, field.Interface())
+
 				}
+
 			case reflect.Slice, reflect.Map:
-				//a := reflect.New(field.Type())
-				field := reflect.NewAt(field_struct.Field_t, unsafe.Pointer(ref_ptr+field_struct.Offset))
-				json.Unmarshal(rows.buffer, field.Interface())
+				field := reflect.NewAt(field_struct.Field_t, unsafe.Pointer(uint_ptr+field_struct.Offset))
+				jsoniter.Unmarshal(rows.buffer, field.Interface())
 			case reflect.Ptr:
-				if string(rows.buffer) != "NULL" {
+				if *(*string)(unsafe.Pointer(&rows.buffer)) != "NULL" {
+					if len(rows.buffer) == 0 || (len(rows.buffer) == 1 && rows.buffer[0] == 0xC0) {
+						continue
+					}
 					field := reflect.New(field_struct.Field_t.Elem())
-					json.Unmarshal(rows.buffer, field.Interface())
-					*((*uintptr)(unsafe.Pointer(ref_ptr + field_struct.Offset))) = field.Pointer()
+					err := jsoniter.Unmarshal(rows.buffer, field.Interface())
+					if err == nil {
+						*((*uintptr)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = field.Pointer()
+					}
 				}
+
 			default:
 				DEBUG(fmt.Sprintf("mysql.Select()反射struct写入需要处理,字段名称%s预计类型%v", string(key), field_struct.Kind))
 			}
 
 		}
-		if is_struct {
-			break
-		}
+
 	}
-	if is_slice {
-		obj.SetLen(rows.result_len)
-	}
+
 	return true, nil
 }
 
@@ -342,7 +365,7 @@ Retry:
  *返回error
  *
  */
-func (this *Mysql) Exec(query_sql []byte, t ...*Transaction) (result bool, err error) {
+func (this *Mysql) exec(query_sql []byte, t ...*Transaction) (result bool, err error) {
 	//var res *Mysql_result
 	//DEBUG(string(query_sql))
 	//var lastInsertId, rowsAffected int64
@@ -453,9 +476,7 @@ func (t *Transaction) Close() {
 			debug.PrintStack()
 		}
 		t.Connect.Status = false
-		t.Connect.Close()
 		t.Connect = nil
-
 		//rollback
 		conn.Exec([]byte{114, 111, 108, 108, 98, 97, 99, 107})
 		t.DB.EndTransaction(conn)
@@ -476,7 +497,6 @@ func Mysql_init(db string, maxConn int, maxIdle int, maxLife int) (mysql *Mysql,
 	if str, _ = Preg_match_result(`([^:]+):([^@]+)@(tcp)?(unix)?\(([^)]*)\)\/([^?]+)\?charset=(\S+)`, db, 1); str == nil || len(str[0]) != 8 {
 		return nil, errors.New("连接数据库，无法解析连接字串：" + db)
 	}
-	DEBUG(Date("Y-m-d H:i:s ", Timestampint()) + "连接数据库" + str[0][5])
 	var charset = "utf8"
 	_, offset := time.Now().Zone()
 	var time_zone string
@@ -743,7 +763,7 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 				buf.WriteString(") ENGINE=")
 				buf.WriteString(mysql.storeEngine)
 				buf.WriteString(" DEFAULT CHARSET=utf8")
-				_, err := mysql.Exec(buf.Bytes(), nil)
+				_, err := mysql.exec(buf.Bytes(), nil)
 				if err != nil {
 					errs = append(errs, errors.New("执行新建数据库失败："+err.Error()+" 错误sql:"+buf.String()))
 					return
@@ -772,12 +792,14 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 						continue
 					}
 					field_str := field_t.Name
-					var is_change, is_text bool
+					var is_change int8
+					var is_text bool
 					var notnull, is_pk bool
-					var default_str, varchar_str string
-					sql_str := make([]string, 4)
+					var default_str, varchar_str, extra_str string
+					sql_str := make([]string, 5)
 					if value, ok := res_m[field_str]; ok {
-
+						extra_str = ""
+						sql_str[4] = value["Extra"]
 						default_str = value["Default"]
 						sql_str[1] = value["Type"]
 						if value["Null"] == "YES" {
@@ -789,6 +811,9 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 						sql_str[3] = value["Default"]
 						if sql_str[3] == "''" {
 							sql_str[3] = ""
+						}
+						if default_str == "''" {
+							default_str = ""
 						}
 						if strings.Contains(tag, "pk") {
 							is_pk = true
@@ -806,33 +831,40 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 						}
 
 						if sc, _ := Preg_match_result(`default\((\d+)\)`, tag, 1); len(sc) > 0 {
-							if sc[0][1] != value["Default"] {
-								default_str = sc[0][1]
-							}
-						} else if sc, _ := Preg_match_result(`default\('([^']*)'\)`, tag, 1); len(sc) > 0 {
-							if sc[0][1] != value["Default"] {
+							default_str = sc[0][1]
 
-								default_str = sc[0][1]
-							}
+						} else if sc, _ := Preg_match_result(`default\('([^']*)'\)`, tag, 1); len(sc) > 0 {
+							default_str = sc[0][1]
+						}
+						if sc, _ := Preg_match_result(`extra\('([^']*)'\)`, tag, 1); len(sc) > 0 {
+							extra_str = sc[0][1]
 						}
 
 						switch {
 						case strings.Contains(tag, "longblob"):
 							varchar_str = "longblob"
+							notnull = false
 						case strings.Contains(tag, "mediumblob"):
 							varchar_str = "mediumblob"
+							notnull = false
 						case strings.Contains(tag, "tinyblob"):
 							varchar_str = "tinyblob"
+							notnull = false
 						case strings.Contains(tag, "blob"):
 							varchar_str = "blob"
+							notnull = false
 						case strings.Contains(tag, "longtext"):
 							varchar_str = "longtext"
+							notnull = false
 						case strings.Contains(tag, "mediumtext"):
 							varchar_str = "mediumtext"
+							notnull = false
 						case strings.Contains(tag, "tinytext"):
 							varchar_str = "tinytext"
+							notnull = false
 						case strings.Contains(tag, "text") && !strings.Contains(tag, "'text'"):
 							varchar_str = "text"
+							notnull = false
 						default:
 							if sc, _ := Preg_match_result(`varchar\(\d+\)`, tag, 1); len(sc) > 0 {
 								varchar_str = sc[0][0]
@@ -841,187 +873,260 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 
 						if notnull {
 							if value["Null"] == "YES" {
-								is_change = true
+								is_change = 1
 								sql_str[2] = "NOT NULL"
 							}
 
 						} else {
 							if value["Null"] == "NO" {
-								is_change = true
+								is_change = 2
 								sql_str[2] = "NULL"
 							}
 						}
-						if is_pk {
-
-							pk = append(pk, field_str)
-							sql_str[2] = "NOT NULL"
-							if sql_str[3] != "0" && sql_str[3] != "current_timestamp()" {
-								sql_str[3] = ""
-							}
-							if default_str != "0" {
-								default_str = ""
-							}
-
-							if is_text {
-								sql_str[1] = "varchar(255)"
+						if strings.Contains(tag, "auto_increment") {
+							extra_str = "auto_increment"
+							if !strings.Contains(value["Extra"], "auto_increment") {
+								is_change = 3
 							}
 						}
 
-						if strings.Contains(tag, "auto_increment") {
-							if !strings.Contains(value["Extra"], "auto_increment") {
-								sql_str[3] = " AUTO_INCREMENT"
-								DEBUG("这里", value)
-								is_change = true
+						switch field.Kind() {
+						case reflect.Int64, reflect.Int:
+							if sql_str[1] != "bigint(20)" && sql_str[1] != "bigint" {
+								is_change = 4
+								sql_str[1] = "bigint(20)"
 							}
-						} else {
-
-							switch field.Kind() {
-							case reflect.Int64, reflect.Uint64, reflect.Int:
-								if sql_str[1] != "bigint(20)" {
-									is_change = true
-									sql_str[1] = "bigint(20)"
+							if default_str == "" || (is_pk && default_str == "NULL") {
+								default_str = "0"
+							}
+						case reflect.Uint64, reflect.Uint:
+							if sql_str[1] != "bigint(20) unsigned" {
+								is_change = 5
+								sql_str[1] = "bigint(20) unsigned"
+							}
+							if default_str == "" || (is_pk && default_str == "NULL") {
+								default_str = "0"
+							}
+						case reflect.Float32:
+							if sql_str[1] != "float" {
+								is_change = 6
+								sql_str[1] = "float"
+							}
+							if default_str == "" || (is_pk && default_str == "NULL") {
+								default_str = "0"
+							}
+						case reflect.Float64:
+							if sql_str[1] != "double" {
+								is_change = 6
+								sql_str[1] = "double"
+							}
+							if default_str == "" || (is_pk && default_str == "NULL") {
+								default_str = "0"
+							}
+						case reflect.String:
+							if varchar_str != "" {
+								if sql_str[1] != varchar_str {
+									is_change = 7
+									sql_str[1] = varchar_str
 								}
-								if default_str == "" || default_str == "NULL" {
-									default_str = "0"
-								}
-							case reflect.Float32:
-								if sql_str[1] != "float" {
-									is_change = true
-									sql_str[1] = "float"
-								}
-							case reflect.String:
-								if varchar_str != "" {
-									if sql_str[1] != varchar_str {
-										is_change = true
-										sql_str[1] = varchar_str
-									}
-									break
-								}
-								sql_str[3] = default_str
-								if strings.Contains(tag, "text") {
-									is_text = true
-									if is_pk {
-										if sql_str[1] != text_pk_type_str {
-											is_change = true
-											sql_str[1] = "text"
-										}
-									} else {
-										if sql_str[1] != "text" {
-											is_change = true
-											sql_str[1] = "text"
-										}
+								break
+							}
+							sql_str[3] = default_str
+							if strings.Contains(tag, "type:text") {
+								is_text = true
+								if is_pk {
+									if sql_str[1] != text_pk_type_str {
+										is_change = 8
+										sql_str[1] = "text"
 									}
 								} else {
-									is_text = true
-									if is_pk {
-										if sql_str[1] != text_pk_type_str {
-											is_change = true
-											sql_str[1] = "text"
-										}
-									} else {
-										if sql_str[1] != "text" {
-											is_change = true
-											sql_str[1] = "text"
-										}
+									if sql_str[1] != "text" {
+										is_change = 9
+										sql_str[1] = "text"
 									}
-
 								}
-							case reflect.Int32, reflect.Uint32:
-								if sql_str[1] != "int(11)" {
-									is_change = true
-									sql_str[1] = "int(11)"
-								}
-								if default_str == "" || default_str == "NULL" {
-									default_str = "0"
-								}
-							case reflect.Int8, reflect.Uint8:
-								if sql_str[1] != "tinyint(3)" {
-									is_change = true
-									sql_str[1] = "tinyint(3)"
-								}
-								if default_str == "" || default_str == "NULL" {
-									default_str = "0"
+							} else {
+								is_text = true
+								if is_pk {
+									if sql_str[1] != text_pk_type_str {
+										is_change = 10
+										sql_str[1] = "text"
+									}
+								} else {
+									if sql_str[1] != "text" {
+										is_change = 11
+										sql_str[1] = "text"
+									}
 								}
 
-							case reflect.Int16, reflect.Uint16:
-								if sql_str[1] != "smallint(6)" {
-									is_change = true
-									sql_str[1] = "smallint(6)"
-								}
-								if default_str == "" || default_str == "NULL" {
-									default_str = "0"
-								}
-							case reflect.Bool:
-								if sql_str[1] != "tinyint(1)" {
-									is_change = true
-									sql_str[1] = "tinyint(1)"
-								}
-								if default_str == "" || default_str == "NULL" {
-									default_str = "1"
-								}
-							case reflect.Struct:
-								switch field.Interface().(type) {
-								case time.Time:
-									if sql_str[1] != "datetime" {
-										is_change = true
-										sql_str[1] = "datetime"
-									}
-									if Preg_match(`^\d{4}-\d{2}-\d{2}$`, default_str) {
-										default_str += " 00:00:00"
-									}
-									if default_str == "" || default_str == "NULL" {
-										default_str = "current_timestamp()"
-									}
-								default:
-									is_text = true
+							}
+						case reflect.Int32:
+							if sql_str[1] != "int(11)" && sql_str[1] != "int" {
+								is_change = 12
+								sql_str[1] = "int(11)"
+							}
+							if default_str == "" || (is_pk && default_str == "NULL") {
+								default_str = "0"
+							}
 
-									if sql_str[1] != "blob" {
-										is_change = true
-										sql_str[1] = "blob"
-									}
+						case reflect.Uint32:
+							if sql_str[1] != "int(11) unsigned" {
+								is_change = 13
+								sql_str[1] = "int(11) unsigned"
+							}
+							if default_str == "" || (is_pk && default_str == "NULL") {
+								default_str = "0"
+							}
+						case reflect.Int8:
+							if sql_str[1] != "tinyint(3)" && sql_str[1] != "tinyint" {
+								is_change = 14
+								sql_str[1] = "tinyint(3)"
+							}
+							if default_str == "" || (is_pk && default_str == "NULL") {
+								default_str = "0"
+							}
+						case reflect.Uint8:
+							if sql_str[1] != "tinyint(3) unsigned" {
+								is_change = 15
+								sql_str[1] = "tinyint(3) unsigned"
+							}
+							if default_str == "" || (is_pk && default_str == "NULL") {
+								default_str = "0"
+							}
+						case reflect.Int16:
+							if sql_str[1] != "smallint(6)" && sql_str[1] != "smallint" {
+								is_change = 16
+								sql_str[1] = "smallint(6)"
+							}
+							if default_str == "" || (is_pk && default_str == "NULL") {
+								default_str = "0"
+							}
+						case reflect.Uint16:
+							if sql_str[1] != "smallint(6) unsigned" {
+								is_change = 17
+								sql_str[1] = "smallint(6) unsigned"
+							}
+							if default_str == "" || (is_pk && default_str == "NULL") {
+								default_str = "0"
+							}
+						case reflect.Bool:
+							if sql_str[1] != "tinyint(1)" {
+								is_change = 18
+								sql_str[1] = "tinyint(1)"
+							}
+							if default_str == "" || (is_pk && default_str == "NULL") {
+								default_str = "1"
+							}
+						case reflect.Struct:
+							switch field.Interface().(type) {
+							case time.Time:
+								var timestr = "datetime"
+								switch {
+								case strings.Contains(tag, "type:timestamp"):
+									timestr = "timestamp"
+								case strings.Contains(tag, "type:time"):
+									timestr = "time"
+								case strings.Contains(tag, "type:date"):
+									timestr = "date"
+								}
+								if sql_str[1] != timestr {
+									is_change = 19
+									sql_str[1] = timestr
+								}
+								if Preg_match(`^\d{4}-\d{2}-\d{2}$`, default_str) {
+									default_str += " 00:00:00"
+								}
+								if default_str == "" || default_str == "NULL" {
+									default_str = "current_timestamp()"
+								}
+								if sql_str[4] == "DEFAULT_GENERATED" && extra_str == "" {
+									extra_str = sql_str[4]
 								}
 							default:
-								if varchar_str != "" {
-									if sql_str[1] != varchar_str {
-										is_change = true
-										sql_str[1] = varchar_str
-									}
-								} else {
-									is_text = true
-									if sql_str[1] != "blob" {
-										is_change = true
-										sql_str[1] = "blob"
-									}
+								is_text = true
+								if !strings.Contains(sql_str[1], "text") {
+									is_change = 20
+									sql_str[1] = "text"
 								}
-
+								default_str = "NULL"
 							}
+						default:
 
-							if sql_str[3] != default_str {
-								is_change = true
-								sql_str[3] = default_str
-							}
-							if sql_str[3] != "" {
-								if sql_str[3] == "current_timestamp()" {
-									sql_str[3] = "Default current_timestamp()"
-								} else {
-									sql_str[3] = "Default '" + strings.Trim(sql_str[3], "'") + "'"
+							if varchar_str != "" {
+								if sql_str[1] != varchar_str {
+									is_change = 21
+									sql_str[1] = varchar_str
 								}
 
 							} else {
-								sql_str[3] = "Default ''"
+								is_text = true
+								if !strings.Contains(sql_str[1], "text") {
+									is_change = 22
+									sql_str[1] = "text"
+								}
+
+							}
+
+							if default_str == "" && !notnull {
+								default_str = "NULL"
 							}
 						}
+						if is_pk {
+							pk = append(pk, field_str)
+							sql_str[2] = "NOT NULL"
+							if !strings.Contains(sql_str[1], "char") {
+								if sql_str[3] != "0" && sql_str[3] != "current_timestamp()" {
+									sql_str[3] = "NULL"
+								}
+								if extra_str == "auto_increment" || default_str == "" {
+									default_str = "NULL"
+								}
+							}
 
-						if is_change {
+							if is_text {
+								sql_str[1] = text_pk_type_str
+							}
+
+						}
+						if sql_str[3] != default_str {
+							DEBUG(sql_str[3], default_str)
+							is_change = 23
+							sql_str[3] = default_str
+						}
+						if sql_str[4] != extra_str {
+
+							is_change = 24
+							sql_str[4] = extra_str
+						}
+						if sql_str[3] != "" {
+							switch sql_str[3] {
+							case "current_timestamp()", "CURRENT_TIMESTAMP":
+								sql_str[3] = "Default " + sql_str[3]
+							case "AUTO_INCREMENT":
+							case "NULL":
+								sql_str[3] = "Default NULL"
+							default:
+								sql_str[3] = "Default '" + strings.Trim(sql_str[3], "'") + "'"
+							}
+
+						} else {
+							sql_str[3] = "Default ''"
+						}
+
+						if is_change > 0 {
 							if is_text {
 								sql_str[3] = ""
 							}
 							sql_str[0] = "modify column `" + field_str + "`"
+							DEBUG(is_change, sql_str)
 							sql = append(sql, strings.Join(sql_str, " "))
 						}
 					} else {
 
 						var after string
+						if i == 0 {
+							after = " FIRST"
+						}
 						for index := i - 1; index > -1; index-- {
 							before_field := t.Field(index)
 							if before_field.Tag.Get(`xorm`) == `-` {
@@ -1032,8 +1137,11 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 						}
 
 						switch field.Kind() {
-						case reflect.Int64, reflect.Uint64, reflect.Int:
+						case reflect.Int64, reflect.Int:
 							sql_str[1] = "bigint(20)"
+							sql_str[3] = "Default '0'"
+						case reflect.Uint64, reflect.Uint:
+							sql_str[1] = "bigint(20) unsigned"
 							sql_str[3] = "Default '0'"
 						case reflect.String:
 
@@ -1045,22 +1153,42 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 							}
 							is_text = true
 							sql_str[1] = "text"
-						case reflect.Int32, reflect.Uint32:
-							sql_str[1] = "int(10)"
+						case reflect.Int32:
+							sql_str[1] = "int(11)"
 							sql_str[3] = "Default '0'"
-						case reflect.Int8, reflect.Uint8:
+						case reflect.Uint32:
+							sql_str[1] = "int(11) unsigned"
+							sql_str[3] = "Default '0'"
+						case reflect.Int8:
 							sql_str[1] = "tinyint(3)"
 							sql_str[3] = "Default '0'"
-						case reflect.Int16, reflect.Uint16:
+						case reflect.Uint8:
+							sql_str[1] = "tinyint(3) unsigned"
+							sql_str[3] = "Default '0'"
+						case reflect.Int16:
 							sql_str[1] = "smallint(6)"
 							sql_str[3] = "Default '0'"
+						case reflect.Uint16:
+							sql_str[1] = "smallint(6) unsigned"
+							sql_str[3] = "Default '0'"
+
 						case reflect.Bool:
 							sql_str[1] = "tinyint(1)"
 							sql_str[3] = "Default '0'"
 						case reflect.Struct:
 							switch r.Field(i).Interface().(type) {
 							case time.Time:
-								sql_str[1] = "datetime"
+								switch {
+								case strings.Contains(tag, "type:timestamp"):
+									sql_str[1] = "timestamp"
+								case strings.Contains(tag, "type:time"):
+									sql_str[1] = "time"
+								case strings.Contains(tag, "type:date"):
+									sql_str[1] = "date"
+								default:
+									sql_str[1] = "datetime"
+								}
+
 								sql_str[3] = "Default current_timestamp()"
 							default:
 								is_text = true
@@ -1069,12 +1197,52 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 						default:
 							is_text = true
 							sql_str[1] = "text"
-
 						}
-						if is_pk {
+						if strings.Contains(tag, "auto_increment") {
+							if !strings.Contains(value["Extra"], "auto_increment") {
+								sql_str[3] = " AUTO_INCREMENT"
+							}
+						}
+						switch {
+						case strings.Contains(tag, "type:longblob"):
+							sql_str[1] = "longblob"
+						case strings.Contains(tag, "type:mediumblob"):
+							sql_str[1] = "mediumblob"
+						case strings.Contains(tag, "type:tinyblob"):
+							sql_str[1] = "tinyblob"
+						case strings.Contains(tag, "type:blob"):
+							sql_str[1] = "blob"
+						case strings.Contains(tag, "type:longtext"):
+							sql_str[1] = "longtext"
+						case strings.Contains(tag, "type:mediumtext"):
+							sql_str[1] = "mediumtext"
+						case strings.Contains(tag, "type:tinytext"):
+							sql_str[1] = "tinytext"
+						case strings.Contains(tag, "type:text"):
+							sql_str[1] = "text"
+
+							sql_str[3] = strings.Replace(sql_str[3], " Default NULL", "", 1)
+						default:
+							if sc, _ := Preg_match_result(`type:(varchar\(\d+\))`, tag, 1); len(sc) > 0 {
+								sql_str[1] = sc[0][1]
+							} else {
+								if sc, _ := Preg_match_result(`type:(char\(\d+\))`, tag, 1); len(sc) > 0 {
+									sql_str[1] = sc[0][1]
+								}
+							}
+						}
+						if strings.Contains(tag, "notnull") || strings.Contains(tag, "not null") {
+							notnull = true
+						}
+						if strings.Contains(tag, "pk") {
 							pk = append(pk, field_str)
 							sql_str[2] = "NOT NULL"
-							sql_str[3] = ""
+							if sql_str[3] != " AUTO_INCREMENT" {
+								sql_str[3] = ""
+							}
+							if sql_str[1] == "text" {
+								sql_str[1] = text_pk_type_str
+							}
 						} else {
 
 							if sc, _ := Preg_match_result(`default\((\d+)\)`, tag, 1); len(sc) > 0 && !is_text {
@@ -1083,10 +1251,19 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 							}
 
 							if sc, _ := Preg_match_result(`default\('([^']*)'\)`, tag, 1); !is_text && len(sc) > 0 {
-								sql_str[3] = "Default '" + sc[0][1] + "'"
+								switch sc[0][1] {
+								case "current_timestamp()":
+									sql_str[3] = "Default " + sc[0][1]
+								case "NULL":
+									sql_str[3] = "Default NULL"
+								default:
+									sql_str[3] = "Default '" + strings.Trim(sc[0][1], "'") + "'"
+								}
 
 							}
-
+							if sc, _ := Preg_match_result(`extra\('([^']*)'\)`, tag, 1); len(sc) > 0 {
+								sql_str[4] = sc[0][1]
+							}
 							if notnull {
 								sql_str[2] = "NOT NULL"
 							} else {
@@ -1109,8 +1286,8 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 				}
 				if len(sql) > 0 {
 					s := "ALTER TABLE " + table_name + " " + strings.Join(sql, ",")
-
-					_, err := mysql.Exec(Str2bytes(s), nil)
+					DEBUG(s)
+					_, err := mysql.exec(Str2bytes(s), nil)
 
 					if err != nil {
 						errs = append(errs, errors.New(table_name+":"+err.Error()))
@@ -1124,7 +1301,7 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 					return
 				}
 				if res[0]["ENGINE"] != mysql.storeEngine {
-					_, err := mysql.Exec([]byte("ALTER TABLE "+table_name+" ENGINE = "+mysql.storeEngine), nil)
+					_, err := mysql.exec([]byte("ALTER TABLE "+table_name+" ENGINE = "+mysql.storeEngine), nil)
 					if err != nil {
 						errs = append(errs, errors.New(table_name+":"+err.Error()))
 						return
@@ -1155,7 +1332,7 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 						buf.WriteString(" (`")
 						buf.WriteString(k)
 						buf.WriteString("`)")
-						_, err = mysql.Exec(buf.Bytes(), nil)
+						_, err = mysql.exec(buf.Bytes(), nil)
 						if err != nil {
 							errs = append(errs, errors.New(table_name+":"+err.Error()))
 							return
@@ -1166,6 +1343,7 @@ func (mysql *Mysql) Sync2(i ...interface{}) (errs []error) {
 
 		}(v)
 	}
+
 	wg.Wait()
 	return errs
 }

@@ -198,7 +198,7 @@ func (this *Mysql_build) Update(i interface{}) (int64, error) {
 						this.str.WriteByte(61)
 						field_m.Store(i, bin)
 					}
-					this.str.Write(this.getvalue(this.pk[pk_i]))
+					this.str.Write(getvalue(this.pk[pk_i]))
 					this.str.Write([]byte{32, 97, 110, 100, 32}) // and
 					pk_i++
 				} else {
@@ -234,7 +234,7 @@ func (this *Mysql_build) Update(i interface{}) (int64, error) {
 				field_m.Store(i, bin)
 			}
 
-			this.str.Write(this.getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
+			this.str.Write(getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
 			this.str.WriteByte(44)
 		}
 	} else {
@@ -274,7 +274,7 @@ func (this *Mysql_build) Update(i interface{}) (int64, error) {
 			this.str.WriteByte(96)
 			this.str.Write(str)
 			this.str.Write([]byte{96, 61})
-			this.str.Write(this.getvalueByUnitptr(r_ptr+field_struct.Offset, field_struct.Field_t.String(), field_struct.Field_t))
+			this.str.Write(getvalueByUnitptr(r_ptr+field_struct.Offset, field_struct.Field_t.String(), field_struct.Field_t))
 			this.str.WriteByte(44)
 
 		}
@@ -358,7 +358,7 @@ func (this *Mysql_build) Get(s interface{}) (bool, error) {
 							this.str.WriteByte(61)
 							field_m.Store(i, bin)
 						}
-						this.str.Write(this.getvalue(this.pk[pk_i]))
+						this.str.Write(getvalue(this.pk[pk_i]))
 						this.str.Write([]byte{32, 97, 110, 100, 32})
 						pk_i++
 					} else {
@@ -441,7 +441,7 @@ func (this *Mysql_build) Find(s interface{}) (err error) {
 								this.str.WriteByte(61)
 								field_m.Store(i, bin)
 							}
-							this.str.Write(this.getvalue(this.pk[pk_i]))
+							this.str.Write(getvalue(this.pk[pk_i]))
 							this.str.Write([]byte{32, 97, 110, 100, 32}) // and
 							pk_i++
 						} else {
@@ -512,7 +512,7 @@ func (this *Mysql_build) Delete(s interface{}) (bool, error) {
 						this.str.WriteByte(61)
 						field_m.Store(i, bin)
 					}
-					this.str.Write(this.getvalue(this.pk[pk_i]))
+					this.str.Write(getvalue(this.pk[pk_i]))
 					this.str.Write([]byte{32, 97, 110, 100, 32}) // and
 					pk_i++
 				} else {
@@ -532,7 +532,7 @@ func (this *Mysql_build) Delete(s interface{}) (bool, error) {
 	this.str.Write(this.order.Bytes())
 	this.str.Write(this.limit.Bytes())
 	//sql := `DELETE FROM ` + this.table_name + this.where.String() + this.order.String() + this.limit.String()
-	result, err := this.DB.Exec(this.str.Bytes(), this.t)
+	result, err := this.DB.exec(this.str.Bytes(), this.t)
 	if err != nil {
 		err = errors.New(`执行Delete出错,sql错误信息：` + err.Error() + `,错误sql：` + this.str.String())
 	}
@@ -663,7 +663,7 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 				this.str.WriteByte(61)
 				field_m.Store(i1, bin)
 			}
-			this.str.Write(this.getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
+			this.str.Write(getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
 
 			this.str.WriteByte(44)
 		}
@@ -703,7 +703,7 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 						this.limit.Write(this.getkey(t.Field(i1).Name))
 						this.limit.WriteByte(44)
 					}
-					this.where.Write(this.getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
+					this.where.Write(getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
 					this.where.WriteByte(44)
 				}
 				this.field.Write(this.where.Bytes()[:this.where.Len()-1])
@@ -728,7 +728,7 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 
 	return nil, errors.New(`执行Insert出错，不支持的插入类型` + fmt.Sprint(r.Kind()))
 }
-func (this *Mysql_build) getvalue(str_i interface{}) []byte {
+func getvalue(str_i interface{}) []byte {
 	var str string
 	switch str_i.(type) {
 	case int8:
@@ -772,9 +772,8 @@ func (this *Mysql_build) getvalue(str_i interface{}) []byte {
 			r = r.Elem()
 		}
 		if r.Kind() == reflect.Struct || r.Kind() == reflect.Map || r.Kind() == reflect.Slice {
-			this.json_encode.B.Reset()
-			this.err = this.json_encode.E.Encode(str_i)
-			str = encodeHex(this.json_encode.B.Bytes())
+
+			str = encodeHex(Json_pack_b(str_i))
 		} else {
 			str = encodeHex([]byte(fmt.Sprint(str_i)))
 		}
@@ -782,7 +781,7 @@ func (this *Mysql_build) getvalue(str_i interface{}) []byte {
 	}
 	return *(*[]byte)(unsafe.Pointer(&str))
 }
-func (this *Mysql_build) getvalueByUnitptr(ptr uintptr, type_name string, field_t reflect.Type) []byte {
+func getvalueByUnitptr(ptr uintptr, type_name string, field_t reflect.Type) []byte {
 	var str string
 	switch type_name {
 	case "int8":
@@ -825,9 +824,7 @@ func (this *Mysql_build) getvalueByUnitptr(ptr uintptr, type_name string, field_
 			r = r.Elem()
 		}
 		if r.Kind() == reflect.Struct || r.Kind() == reflect.Map || r.Kind() == reflect.Slice {
-			this.json_encode.B.Reset()
-			this.err = this.json_encode.E.Encode(r.Addr().Interface())
-			str = encodeHex(this.json_encode.B.Bytes())
+			str = encodeHex(Json_pack_b(r.Addr().Interface()))
 		} else {
 			if r.Kind() == reflect.Invalid {
 				str = "null"
@@ -935,4 +932,12 @@ func (this *Mysql_build) put() {
 		return
 	}
 	build_chan <- this
+}
+func (this *Mysql) Exec(sql string, arg ...interface{}) (bool, error) {
+	b := []byte(sql)
+	for _, v := range arg {
+		b = bytes.Replace(b, []byte("?"), getvalue(v), 1)
+	}
+
+	return this.exec(b, nil)
 }

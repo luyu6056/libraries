@@ -171,33 +171,22 @@ func Msgpack_pack(s interface{}) string {
 }
 
 func Json_pack(s interface{}) string {
-	j := <-json_chan
-	defer func() {
-		j.B.Reset()
-		json_chan <- j
-	}()
-	err := j.E.Encode(s)
+
+	b, err := gjson.Marshal(s)
 	if err != nil {
 		DEBUG("json序列化失败", err)
 		return ""
 	}
 
-	return j.B.String()
+	return string(b)
 }
 func Json_pack_b(s interface{}) []byte {
-	j := <-json_chan
-	defer func() {
-		j.B.Reset()
-		json_chan <- j
-	}()
-	err := j.E.Encode(s)
+	b, err := gjson.Marshal(s)
 	if err != nil {
 		DEBUG("json序列化失败", err)
 		return nil
 	}
-	bin := make([]byte, len(j.B.Bytes()))
-	copy(bin, j.B.Bytes())
-	return bin
+	return b
 }
 
 func Msgpack_pack_b(s interface{}) []byte {
@@ -368,11 +357,17 @@ type Msgpack_decode struct {
 }
 
 var gjson = jsoniter.ConfigFastest
-var json_chan = make(chan *Json_encode, runtime.NumCPU())
-var json_d_chan = make(chan *Json_decode, runtime.NumCPU())
 var msgpack_chan = make(chan *Msgpack_encode, runtime.NumCPU())
 var msgpack_d_chan = make(chan *Msgpack_decode, runtime.NumCPU())
 
 func init() {
+	for i := 0; i < runtime.NumCPU(); i++ {
+		m := &Msgpack_encode{B: new(bytes.Buffer)}
+		m.E = msgpack.NewEncoder(m.B)
+		msgpack_chan <- m
 
+		m_d := &Msgpack_decode{B: new(bytes.Buffer)}
+		m_d.D = msgpack.NewDecoder(m_d.B)
+		msgpack_d_chan <- m_d
+	}
 }

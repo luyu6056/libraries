@@ -1,4 +1,4 @@
-module github.com/luyu6056/libraries
+module libraries
 
 go 1.15
 
