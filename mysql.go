@@ -137,7 +137,6 @@ func (this *Mysql) Select(select_sql []byte, t *Transaction, r interface{}) (res
 		} else if type_struct.Kind() == reflect.Ptr {
 			type_struct = type_struct.Elem()
 			if type_struct.Kind() == reflect.Struct {
-
 				is_ptr = true
 			}
 		}
@@ -162,7 +161,8 @@ func (this *Mysql) Select(select_sql []byte, t *Transaction, r interface{}) (res
 				if obj.Elem().Kind() == reflect.Invalid {
 					obj.Set(reflect.New(type_struct))
 				}
-				ref_ptr = unsafe.Pointer(obj.Pointer())
+
+				ref_ptr = unsafe.Pointer(obj.Addr().Pointer())
 			} else {
 				err = errors.New("不支持的反射类型")
 				return
@@ -218,12 +218,6 @@ Retry:
 
 	if is_struct {
 		offset = 0
-		if is_ptr {
-			if *(*interface{})(unsafe.Pointer(ref_ptr)) == nil {
-				*(*uintptr)(ref_ptr) = reflect.New(type_struct).Pointer()
-			}
-		}
-
 		rows.msg_len = rows.msg_len[:1]
 	} else {
 		if header.Len < rows.result_len {

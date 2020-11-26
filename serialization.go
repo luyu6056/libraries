@@ -369,5 +369,6 @@ func init() {
 		m_d := &Msgpack_decode{B: new(bytes.Buffer)}
 		m_d.D = msgpack.NewDecoder(m_d.B)
 		msgpack_d_chan <- m_d
+
 	}
 }
