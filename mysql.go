@@ -66,7 +66,7 @@ func (this *Mysql) Query_Select(select_sql string, t *Transaction) (maps []map[s
 		return
 	}
 	var rows = rows_pool.Get().(*MysqlRows)
-	var columns [][]byte
+	var columns []MysqlColumn
 	defer rows_pool.Put(rows)
 Retry:
 	if t != nil && t.Connect != nil {
@@ -75,7 +75,7 @@ Retry:
 			return
 		}
 	} else {
-		columns, err = this.db.Query([]byte(select_sql), rows)
+		columns, err = this.db.query([]byte(select_sql), rows, nil)
 		if err != nil {
 			if strings.Contains(err.Error(), "EOF") {
 				goto Retry
@@ -101,7 +101,7 @@ Retry:
 			if err != nil {
 				return
 			}
-			record[string(key)] = string(rows.buffer)
+			record[string(key.name)] = string(rows.buffer)
 		}
 		maps[index] = record
 	}
@@ -186,7 +186,7 @@ func (this *Mysql) Select(select_sql []byte, t *Transaction, r interface{}) (res
 	}
 
 	var rows = rows_pool.Get().(*MysqlRows)
-	var columns [][]byte
+	var columns []MysqlColumn
 	defer rows_pool.Put(rows)
 Retry:
 
@@ -197,7 +197,7 @@ Retry:
 		}
 	} else {
 
-		columns, err = this.db.Query(select_sql, rows)
+		columns, err = this.db.query(select_sql, rows, nil)
 		if err != nil {
 			if strings.Contains(err.Error(), "EOF") {
 				goto Retry
@@ -256,26 +256,27 @@ Retry:
 				return false, err
 			}
 
-			if v, ok := field_m.Load(string(key)); ok {
-				if v.(*Field_struct).Kind == reflect.Invalid {
+			if v, ok := field_m.Load(string(key.name)); ok {
+				if v.(*Field_struct).Field_t == nil {
 					continue
 				}
 				field_struct = v.(*Field_struct)
 			} else {
-				real_key := string(key)
-				key[0] = bytes.ToUpper(key[:1])[0]
-				field, ok := type_struct.FieldByName(string(key))
+				real_key := string(key.name)
+				key.name[0] = bytes.ToUpper(key.name[:1])[0]
+				field, ok := type_struct.FieldByName(string(key.name))
 				if !ok {
-					DEBUG("mysql.Select()反射struct无法写入字段" + string(key) + "sql: " + string(select_sql))
-					field_m.Store(real_key, &Field_struct{Kind: reflect.Invalid})
+					DEBUG("mysql.Select()反射struct无法写入字段" + string(key.name) + "sql: " + string(select_sql))
+					field_m.Store(real_key, &Field_struct{})
+
 					continue
 				}
 
-				field_struct = &Field_struct{Offset: field.Offset, Kind: field.Type.Kind(), Field_t: field.Type}
+				field_struct = &Field_struct{Offset: field.Offset, Field_t: field.Type}
 				field_m.Store(real_key, field_struct)
 			}
 
-			switch field_struct.Kind {
+			switch field_struct.Field_t.Kind() {
 			case reflect.Int:
 				ii, _ := strconv.Atoi(*(*string)(unsafe.Pointer(&rows.buffer)))
 				*((*int)(unsafe.Pointer(uint_ptr + field_struct.Offset))) = ii
@@ -345,7 +346,7 @@ Retry:
 				}
 
 			default:
-				DEBUG(fmt.Sprintf("mysql.Select()反射struct写入需要处理,字段名称%s预计类型%v", string(key), field_struct.Kind))
+				DEBUG(fmt.Sprintf("mysql.Select()反射struct写入需要处理,字段名称%s预计类型%v", string(key.name), field_struct.Field_t.Kind()))
 			}
 
 		}
@@ -369,7 +370,7 @@ func (this *Mysql) exec(query_sql []byte, t ...*Transaction) (result bool, err e
 
 	} else {
 	Retry:
-		_, _, err = this.db.Exec(query_sql)
+		_, _, err = this.db.exec(query_sql, nil)
 		if err != nil {
 			if strings.Contains(err.Error(), "EOF") {
 				goto Retry
@@ -395,7 +396,7 @@ func (this *Mysql) Query_getaffected(query_sql []byte, t *Transaction) (rowsAffe
 		_, rowsAffected, err = t.Connect.Exec(query_sql)
 	} else {
 	Retry:
-		_, rowsAffected, err = this.db.Exec(query_sql)
+		_, rowsAffected, err = this.db.exec(query_sql, nil)
 		if err != nil {
 			if strings.Contains(err.Error(), "EOF") {
 				goto Retry
@@ -444,10 +445,17 @@ func (this *Mysql) NewSession() (t *Transaction) {
 	return
 }
 func (t *Transaction) Begin() (err error) {
-	t.Connect, err = t.DB.BeginTransaction()
+	t.Connect, err = t.DB.getConn()
 	if err != nil {
-		return
+		return err
 	}
+	_, _, err = t.Connect.Exec([]byte{115, 116, 97, 114, 116, 32, 116, 114, 97, 110, 115, 97, 99, 116, 105, 111, 110}) //start transaction
+	if err != nil {
+		t.Connect.Close()
+		t.Connect = nil
+		return err
+	}
+
 	t.Mysql_build.t = t
 	return
 }
@@ -473,7 +481,7 @@ func (t *Transaction) Close() {
 		t.Connect = nil
 		//rollback
 		conn.Exec([]byte{114, 111, 108, 108, 98, 97, 99, 107})
-		t.DB.EndTransaction(conn)
+		t.DB.endTransaction(conn)
 	}
 }
 func (mysql *Mysql) Close() {
@@ -492,31 +500,28 @@ func Mysql_init(db string, maxConn int, maxIdle int, maxLife int) (mysql *Mysql,
 		return nil, errors.New("连接数据库，无法解析连接字串：" + db)
 	}
 	var charset = "utf8"
-	_, offset := time.Now().Zone()
-	var time_zone string
-	if offset >= 0 {
-		time_zone = "+" + strconv.Itoa(offset/3600) + ":00"
-	} else {
-		time_zone = strconv.Itoa(offset/3600) + ":00"
-	}
+
+	var mysqlLoc = time.UTC
 	if str[0][7] != "" {
 		for _, s := range strings.Split(str[0][7], "&") {
 			if value := strings.Split(url.PathEscape(s), "="); len(value) == 2 {
 				switch value[0] {
 				case "charset":
 					charset = value[1]
-				case "time_zone":
-					time_zone = value[2]
+				case "loc":
+					if newloc, err := time.LoadLocation(value[1]); err == nil {
+						mysqlLoc = newloc
+					}
 				}
 			}
 		}
 	}
-	mysql.db = mysql_open(str[0][1], str[0][2], str[0][5], str[0][6], charset, time_zone, nil)
-	mysql.db.MaxOpenConns = int32(maxConn)
+	mysql.db = mysql_open(str[0][1], str[0][2], str[0][5], str[0][6], charset, mysqlLoc, nil)
+	mysql.db.SetMaxOpenConns(int32(maxConn))
 	if maxIdle <= 0 {
 		maxIdle = 1
 	}
-	mysql.db.MaxIdleConns = int32(maxIdle)
+	mysql.db.SetMaxIdleConns(int32(maxIdle))
 	mysql.db.ConnMaxLifetime = int64(maxLife)
 	err = mysql.db.Ping()
 	build_chan = make(chan *Mysql_build, maxConn)

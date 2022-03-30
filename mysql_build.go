@@ -234,7 +234,7 @@ func (this *Mysql_build) Update(i interface{}) (int64, error) {
 				field_m.Store(i, bin)
 			}
 
-			this.str.Write(getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
+			this.str.Write(this.getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
 			this.str.WriteByte(44)
 		}
 	} else {
@@ -255,7 +255,7 @@ func (this *Mysql_build) Update(i interface{}) (int64, error) {
 			var field_struct *Field_struct
 			if v, ok := field_str_m.Load(string(str)); ok {
 				field_struct = v.(*Field_struct)
-				if field_struct.Kind == reflect.Invalid {
+				if field_struct.Field_t == nil {
 					return 0, errors.New("update执行失败，找不到field值" + string(field_str))
 				}
 			} else {
@@ -263,18 +263,18 @@ func (this *Mysql_build) Update(i interface{}) (int64, error) {
 				field, ok := t.FieldByName(keyname)
 				if !ok {
 
-					field_str_m.Store(string(str), &Field_struct{Kind: reflect.Invalid})
+					field_str_m.Store(string(str), &Field_struct{})
 					return 0, errors.New("update执行失败，找不到field值" + string(field_str))
 
 				}
-				field_struct = &Field_struct{Offset: field.Offset, Kind: field.Type.Kind(), Field_t: field.Type}
+				field_struct = &Field_struct{Offset: field.Offset, Field_t: field.Type}
 				field_str_m.Store(string(str), field_struct)
 			}
 
 			this.str.WriteByte(96)
 			this.str.Write(str)
 			this.str.Write([]byte{96, 61})
-			this.str.Write(getvalueByUnitptr(r_ptr+field_struct.Offset, field_struct.Field_t.String(), field_struct.Field_t))
+			this.str.Write(this.getvalueByUnitptr(r_ptr+field_struct.Offset, field_struct.Field_t.String(), field_struct.Field_t))
 			this.str.WriteByte(44)
 
 		}
@@ -569,7 +569,7 @@ func (this *Mysql) Insert(s ...interface{}) (LastInsertId int64, err error) {
 		LastInsertId, rowsAffected, err = t.Connect.Exec(sql)
 	} else {
 	Retry:
-		LastInsertId, rowsAffected, err = this.db.Exec(sql)
+		LastInsertId, rowsAffected, err = this.db.exec(sql, nil)
 		if err != nil {
 			if strings.Contains(err.Error(), "EOF") {
 				goto Retry
@@ -605,7 +605,7 @@ func (this *Mysql_build) Insert(s interface{}) (LastInsertId int64, err error) {
 		LastInsertId, rowsAffected, err = this.t.Connect.Exec(sql)
 	} else {
 	Retry:
-		LastInsertId, rowsAffected, err = this.DB.db.Exec(sql)
+		LastInsertId, rowsAffected, err = this.DB.db.exec(sql, nil)
 		if err != nil {
 			if strings.Contains(err.Error(), "EOF") {
 				goto Retry
@@ -663,7 +663,7 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 				this.str.WriteByte(61)
 				field_m.Store(i1, bin)
 			}
-			this.str.Write(getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
+			this.str.Write(this.getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
 
 			this.str.WriteByte(44)
 		}
@@ -677,9 +677,21 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 		}
 		for i := 0; i < r.Len(); i++ {
 			v := r.Index(i)
-			for v.Kind() == reflect.Ptr {
-
+			var r_ptr uintptr
+			switch v.Kind() {
+			case reflect.Ptr:
 				v = v.Elem()
+				r_ptr = v.Addr().Pointer()
+			case reflect.Interface:
+				r_ptr = v.InterfaceData()[1]
+				v = v.Elem()
+				if v.Kind() == reflect.Ptr {
+					v = v.Elem()
+					r_ptr = v.Addr().Pointer()
+				}
+			case reflect.Struct:
+
+				r_ptr = r.Pointer() + v.Type().Size()*uintptr(i)
 			}
 			switch v.Kind() {
 			case reflect.Struct:
@@ -690,7 +702,7 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 				t := v.Type()
 
 				var field_t reflect.StructField
-				r_ptr := v.Addr().Pointer()
+
 				this.field.WriteByte(40)
 				this.where.Reset() //借用buffer
 				for i1 := 0; i1 < t.NumField(); i1++ {
@@ -703,7 +715,8 @@ func (this *Mysql_build) Build_insertsql(s interface{}) ([]byte, error) {
 						this.limit.Write(this.getkey(t.Field(i1).Name))
 						this.limit.WriteByte(44)
 					}
-					this.where.Write(getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
+
+					this.where.Write(this.getvalueByUnitptr(r_ptr+field_t.Offset, field_t.Type.String(), field_t.Type))
 					this.where.WriteByte(44)
 				}
 				this.field.Write(this.where.Bytes()[:this.where.Len()-1])
@@ -781,7 +794,10 @@ func getvalue(str_i interface{}) []byte {
 	}
 	return *(*[]byte)(unsafe.Pointer(&str))
 }
-func getvalueByUnitptr(ptr uintptr, type_name string, field_t reflect.Type) []byte {
+func (this *Mysql_build) loc() *time.Location {
+	return this.DB.db.loc
+}
+func (this *Mysql_build) getvalueByUnitptr(ptr uintptr, type_name string, field_t reflect.Type) []byte {
 	var str string
 	switch type_name {
 	case "int8":
@@ -817,7 +833,7 @@ func getvalueByUnitptr(ptr uintptr, type_name string, field_t reflect.Type) []by
 	case "string":
 		str = "'" + value_srp.Replace(*((*string)(unsafe.Pointer(ptr)))) + "'"
 	case "time.Time":
-		str = "'" + (*((*time.Time)(unsafe.Pointer(ptr)))).Format("2006-01-02 15:04:05") + "'"
+		str = "'" + (*((*time.Time)(unsafe.Pointer(ptr)))).In(this.loc()).Format("2006-01-02 15:04:05") + "'"
 	default:
 		r := reflect.NewAt(field_t, unsafe.Pointer(ptr)).Elem()
 		for r.Kind() == reflect.Ptr {
@@ -901,7 +917,7 @@ func (this *Mysql_build) bin_getValue(str_i interface{}, bin *bytes.Buffer) {
 		bin.WriteString(value_srp.Replace(str_i.(string)))
 
 	case time.Time:
-		bin.WriteString(str_i.(time.Time).Format("2006-01-02 15:04:05"))
+		bin.WriteString(str_i.(time.Time).In(this.loc()).Format("2006-01-02 15:04:05"))
 	default:
 		r := reflect.ValueOf(str_i)
 		for r.Kind() == reflect.Ptr {

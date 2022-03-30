@@ -24,7 +24,6 @@ import (
 
 	"github.com/dlclark/regexp2"
 	"github.com/klauspost/compress/gzip"
-	"github.com/klauspost/pgzip"
 	//"path/filepath"
 	//
 )
@@ -48,11 +47,6 @@ func init() {
 			},
 		}
 		MsgBuf_chan <- &MsgBuffer{}
-		writer := new(Pgzip_writer)
-		writer.B = new(bytes.Buffer)
-		writer.Writer, _ = pgzip.NewWriterLevel(writer.B, 4) //4级解压速度快
-		writer.Writer.SetConcurrency(100000, 10)
-		pgzipcompress_chan <- writer
 
 		gzip_writer := new(Gzip_writer)
 		gzip_writer.Buf = new(MsgBuffer)
@@ -63,10 +57,6 @@ func init() {
 
 }
 
-type Pgzip_writer struct {
-	B      *bytes.Buffer
-	Writer *pgzip.Writer
-}
 type Buffer_reader struct {
 	b *bytes.Buffer
 }
@@ -75,54 +65,8 @@ type Gzip_writer struct {
 	Writer *gzip.Writer
 }
 
-var pgzipcompress_chan = make(chan *Pgzip_writer, runtime.NumCPU())
 var uncompress_chan = make(chan *bytes.Buffer, runtime.NumCPU())
 var gzipcompress_chan = make(chan *Gzip_writer, runtime.NumCPU())
-
-func DopgzipCompress(src []byte) []byte {
-	g := <-pgzipcompress_chan
-	defer func() {
-		g.B.Reset()
-		pgzipcompress_chan <- g
-	}()
-	g.Writer.Reset(g.B)
-	leng, err := g.Writer.Write(src)
-	if err != nil || leng == 0 {
-		return nil
-	}
-	err = g.Writer.Flush()
-	if err != nil {
-		return nil
-	}
-	err = g.Writer.Close()
-	if err != nil {
-		return nil
-	}
-	b := make([]byte, len(g.B.Bytes()))
-	copy(b, g.B.Bytes())
-	return b
-}
-
-func DopgzipUnCompress(compressSrc []byte) []byte {
-	b := <-uncompress_chan
-	b.Reset()
-	defer func() {
-		uncompress_chan <- b
-	}()
-	b.Write(compressSrc)
-	r, err := pgzip.NewReader(b)
-	if err != nil {
-		return nil
-	}
-	defer r.Close()
-	ndatas, err := ioutil.ReadAll(r)
-	res := make([]byte, len(ndatas))
-	copy(res, ndatas)
-	if err != nil {
-		return res
-	}
-	return res
-}
 
 func DogzipCompress(src []byte) []byte {
 	g := <-gzipcompress_chan
@@ -705,77 +649,7 @@ func Strtotime(str string) int64 {
 	return tm2.Unix()
 }
 
-func Reflect_setString(r *reflect.Value, s string) {
-	switch r.Kind() {
-	case reflect.Int, reflect.Int64:
-		i, err := strconv.ParseInt(s, 10, 64)
-		if err == nil {
-			r.SetInt(i)
-		}
-	case reflect.Int32:
-		i, err := strconv.ParseInt(s, 10, 32)
-		if err == nil {
-			r.SetInt(i)
-		}
-	case reflect.Int16:
-		i, err := strconv.ParseInt(s, 10, 16)
-		if err == nil {
-			r.SetInt(i)
-		}
-	case reflect.Int8:
-		i, err := strconv.ParseInt(s, 10, 8)
-		if err == nil {
-			r.SetInt(i)
-		}
-	case reflect.Uint, reflect.Uint64:
-		i, err := strconv.ParseUint(s, 10, 64)
-		if err == nil {
-			r.SetUint(i)
-		}
-	case reflect.Uint32:
-		i, err := strconv.ParseUint(s, 10, 32)
-		if err == nil {
-			r.SetUint(i)
-		}
-	case reflect.Uint16:
-		i, err := strconv.ParseUint(s, 10, 16)
-		if err == nil {
-			r.SetUint(i)
-		}
-	case reflect.Uint8:
-		i, err := strconv.ParseUint(s, 10, 8)
-		if err == nil {
-			r.SetUint(i)
-		}
-	case reflect.Float32:
-		f, err := strconv.ParseFloat(s, 32)
-		if err == nil {
-			r.SetFloat(f)
-		}
-	case reflect.Float64:
-		f, err := strconv.ParseFloat(s, 64)
-		if err == nil {
-			r.SetFloat(f)
-		}
-	case reflect.String:
-		r.SetString(s)
-	default:
-		switch r.Interface().(type) {
-		case []string:
-			var tmp []string
-			Msgpack_unpack(s, &tmp)
-			r.Set(reflect.ValueOf(tmp))
-		case map[string]string:
-			var tmp map[string]string
-			Msgpack_unpack(s, &tmp)
-			r.Set(reflect.ValueOf(tmp))
-		case map[string]map[string]string:
-			var tmp map[string]map[string]string
-			Msgpack_unpack(s, &tmp)
-			r.Set(reflect.ValueOf(tmp))
-		}
-	}
-}
+
 func File_exists(path string) (bool, error) {
 	_, err := os.Stat(path)
 	if err == nil {

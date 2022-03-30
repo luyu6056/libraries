@@ -2,18 +2,15 @@ package libraries
 
 import (
 	"bytes"
-	"errors"
-	"fmt"
 	"reflect"
-	"runtime"
 	"strconv"
 	"sync"
 	"unsafe"
 
 	jsoniter "github.com/json-iterator/go"
-	"github.com/vmihailenco/msgpack"
 )
 
+var gjson jsoniter.API= jsoniter.ConfigCompatibleWithStandardLibrary
 var serializationbufpool = sync.Pool{
 	New: func() interface{} {
 		return &MsgBuffer{}
@@ -26,55 +23,6 @@ func S2B(s *string) []byte {
 
 func B2S(buf []byte) string {
 	return *(*string)(unsafe.Pointer(&buf))
-}
-
-func mspack_unpack(s interface{}, r ...interface{}) (interface{}, error) {
-	if s == nil {
-		return nil, nil
-	}
-	var (
-		v interface{} // value to decode/encode into
-	)
-	m := <-msgpack_d_chan
-	defer func() {
-		msgpack_d_chan <- m
-	}()
-	var err error
-	switch s.(type) {
-	case string:
-
-		if s.(string) == "" || (len([]rune(s.(string))) == 1 && []rune(s.(string))[0] == 63) {
-			return nil, nil
-		}
-		m.B.WriteString(s.(string))
-
-		//err = codec.NewDecoder(strings.NewReader(s.(string)), &mh).Decode(&v)
-	case []byte:
-		if len(s.([]byte)) == 0 {
-			return nil, nil
-		}
-		m.B.Write(s.([]byte))
-	}
-	if len(r) == 1 {
-		err = m.D.Decode(r[0])
-		//err = codec.NewDecoder(strings.NewReader(s.(string)), &mh).Decode(r[0])
-	} else {
-		err = m.D.Decode(&v)
-
-	}
-	if err != nil {
-		m.B.Reset()
-		return nil, errors.New(err.Error() + " 失败内容 " + fmt.Sprint(s))
-
-	}
-	return v, nil
-}
-func Msgpack_unpack(s interface{}, r ...interface{}) (interface{}, error) {
-	res, err := mspack_unpack(s, r...)
-	if len(r) == 1 {
-		return nil, err
-	}
-	return Initresult(res), err
 }
 
 //返回map[string]string
@@ -155,20 +103,6 @@ func JsonUnmarshal(b []byte, v interface{}) (err error) {
 	serializationbufpool.Put(buf)
 	return
 }
-func Msgpack_pack(s interface{}) string {
-	m := <-msgpack_chan
-	defer func() {
-		m.B.Reset()
-		msgpack_chan <- m
-	}()
-
-	err := m.E.Encode(s)
-	if err != nil {
-		DEBUG("msgpack序列化失败", err)
-		return ""
-	}
-	return m.B.String()
-}
 
 func Json_pack(s interface{}) string {
 
@@ -189,21 +123,6 @@ func Json_pack_b(s interface{}) []byte {
 	return b
 }
 
-func Msgpack_pack_b(s interface{}) []byte {
-	m := <-msgpack_chan
-	defer func() {
-		m.B.Reset()
-		msgpack_chan <- m
-	}()
-	err := m.E.Encode(s)
-	if err != nil {
-		DEBUG("msgpack序列化失败", err)
-		return nil
-	}
-	bin := make([]byte, len(m.B.Bytes()))
-	copy(bin, m.B.Bytes())
-	return bin
-}
 func Initresult(v interface{}) interface{} {
 	if v == nil {
 		return nil
@@ -291,6 +210,8 @@ func I2s(v interface{}) (result string, ok bool) {
 		result = strconv.FormatInt(int64(v.(int8)), 10)
 	case int:
 		result = strconv.FormatInt(int64(v.(int)), 10)
+	case uintptr:
+		result = strconv.FormatInt(int64(v.(uintptr)), 10)
 	case float32:
 		result = Number_format(v, 10)
 	case float64:
@@ -346,29 +267,4 @@ type Json_encode struct {
 type Json_decode struct {
 	D *jsoniter.Decoder
 	B *bytes.Buffer
-}
-type Msgpack_encode struct {
-	E *msgpack.Encoder
-	B *bytes.Buffer
-}
-type Msgpack_decode struct {
-	D *msgpack.Decoder
-	B *bytes.Buffer
-}
-
-var gjson = jsoniter.ConfigFastest
-var msgpack_chan = make(chan *Msgpack_encode, runtime.NumCPU())
-var msgpack_d_chan = make(chan *Msgpack_decode, runtime.NumCPU())
-
-func init() {
-	for i := 0; i < runtime.NumCPU(); i++ {
-		m := &Msgpack_encode{B: new(bytes.Buffer)}
-		m.E = msgpack.NewEncoder(m.B)
-		msgpack_chan <- m
-
-		m_d := &Msgpack_decode{B: new(bytes.Buffer)}
-		m_d.D = msgpack.NewDecoder(m_d.B)
-		msgpack_d_chan <- m_d
-
-	}
 }
